@@ -78,13 +78,45 @@ urlpatterns = [
     # Core routes (vendors/list, projects, materials, vendor AJAX APIs)
     path('', include('core.urls')),
 
+    # --- React-owned sub-paths under prefixes core.urls also uses ---
+    # core.urls declares vendors/, projects/, materials/ as prefixes, and the
+    # React router (frontend/src/App.jsx) independently owns other sub-paths
+    # under those same prefixes (vendors/new, projects/solar-tracker, the
+    # materials/quotations/* flow, etc). Everything core.urls actually
+    # defines already matched above this point and never reaches these
+    # entries. Listing the known React sub-paths explicitly lets the
+    # tightened catch-all below safely 404 anything else under these
+    # prefixes instead of silently serving the SPA for a broken/renamed
+    # Django route. Keep this in sync with App.jsx.
+    re_path(r'^vendors/?$', _react_index),
+    re_path(r'^vendors/[^/]+/?$', _react_index),                        # vendors/new, vendors/<id>
+    re_path(r'^projects/?$', _react_index),
+    re_path(r'^projects/new/?$', _react_index),
+    re_path(r'^projects/solar-tracker/?$', _react_index),
+    re_path(r'^materials/?$', _react_index),
+    re_path(r'^materials/quotations/?$', _react_index),
+    re_path(r'^materials/quotations/new/?$', _react_index),
+    re_path(r'^materials/quotations/[^/]+/?$', _react_index),           # quotations/<id>
+    re_path(r'^materials/quotations/[^/]+/preview/?$', _react_index),   # quotations/<id>/preview
+
     # React build assets — served from frontend/dist/assets/
     re_path(r'^assets/(?P<path>.*)$', static_serve,
             {'document_root': os.path.join(_REACT_DIST, 'assets')}),
 
-    # Catch-all: any route not matched by Django serves the React app
-    # (React Router handles client-side navigation from there)
-    re_path(r'^.*$', _react_index),
+    # Catch-all: serves the React app for everything else React owns
+    # (dashboard, purchase-orders, deliveries, payments, transport, tasks,
+    # reports, notifications, assistant, administration, login, and the
+    # client-side 404 page). Paths under prefixes Django exclusively owns
+    # (admin/, api/, static/, administration/, procurement/, vendor-control/,
+    # signout/, media/) — plus anything under vendors/, projects/,
+    # materials/ not explicitly allowed above — are excluded, so a broken
+    # or renamed Django route now returns a real 404 instead of silently
+    # rendering the SPA shell.
+    re_path(
+        r'^(?!admin/|api/|static/|administration/|procurement/|vendor-control/'
+        r'|signout/|media/|vendors/|projects/|materials/).*$',
+        _react_index,
+    ),
 ]
 
 if settings.DEBUG:

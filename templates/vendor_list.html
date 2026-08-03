@@ -301,5 +301,5 @@
 {% block scripts %}
 {{ vendor_detail_rows|json_script:"vendor-detail-data" }}
 <script>const VENDOR_UPDATE_URL_TEMPLATE = "/vendors/__VENDOR_ID__/update/";</script>
-<script src="{% static 'js/vendor-list.js' %}?v={% now "U" %}"></script>
+<script src="{% static 'legacy/js/vendor-list.js' %}?v={% now "U" %}"></script>
 {% endblock %}

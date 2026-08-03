@@ -6,14 +6,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ page_title|default:"Vendor Portal" }} - Omega Vendor Portal</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
-    <link href="{% static 'css/custom.css' %}?v={% now "U" %}" rel="stylesheet">
+    <link href="{% static 'legacy/css/custom.css' %}?v={% now "U" %}" rel="stylesheet">
 </head>
 <body class="app-shell portal-shell">
     <div class="app-layout">
         <aside class="sidebar-panel portal-sidebar">
             <div>
                 <a class="brand-logo-link" href="{% url 'vendor-portal-dashboard' %}" aria-label="Vendor portal home">
-                    <img class="brand-logo-image" src="{% static 'branding/omega-logo.png' %}" alt="OmegaERP logo">
+                    <img class="brand-logo-image" src="{% static 'legacy/branding/omega-logo.png' %}" alt="OmegaERP logo">
                 </a>
                 <div class="brand-subtitle mt-2">Vendor Portal</div>
             </div>

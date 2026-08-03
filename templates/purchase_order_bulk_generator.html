@@ -101,5 +101,5 @@
     const BULK_PO_CHECK_URL = "{% url 'purchase-order-bulk-check' %}";
     const INITIAL_ALL_MATCHED = {{ all_matched|yesno:"true,false" }};
 </script>
-<script src="{% static 'js/po-bulk-generator.js' %}?v={% now "U" %}"></script>
+<script src="{% static 'legacy/js/po-bulk-generator.js' %}?v={% now "U" %}"></script>
 {% endblock %}
