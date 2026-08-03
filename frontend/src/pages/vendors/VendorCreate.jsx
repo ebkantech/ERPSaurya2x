@@ -1,13 +1,9 @@
 import React, { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Building2, User, FileText, CreditCard, CheckCircle, Loader2 } from 'lucide-react'
+import api from '../../services/api'
 
-function getCookie(name) {
-  const value = `; ${document.cookie}`
-  const parts = value.split(`; ${name}=`)
-  if (parts.length === 2) return parts.pop().split(';').shift()
-  return ''
-}
+const VENDOR_REGISTER_URL = '/vendors/register/'
 
 const SECTIONS = ['Company', 'Contact', 'KYC', 'Financial']
 
@@ -77,30 +73,32 @@ export default function VendorCreate() {
     })
 
     try {
-      const res = await fetch('/vendors/register/', {
-        method: 'POST',
-        headers: { 'X-CSRFToken': getCookie('csrftoken') },
-        credentials: 'include',
-        body: fd,
-      })
+      // Content-Type must be unset (not the client's default 'application/json')
+      // so axios/the browser can set multipart/form-data with the boundary itself.
+      const res = await api.post(VENDOR_REGISTER_URL, fd, { headers: { 'Content-Type': undefined } })
 
-      const ct = res.headers.get('content-type') || ''
+      const ct = res.headers['content-type'] || ''
       if (!ct.includes('application/json')) {
         setError('Session expired or not logged in. Please log in via /admin/login/ and try again.')
         setSubmitting(false)
         return
       }
 
-      const data = await res.json()
-      if (res.ok && data.vendor_id) {
-        setSuccess(`Vendor registered successfully! ID: ${data.vendor_id}`)
+      if (res.data.vendor_id) {
+        setSuccess(`Vendor registered successfully! ID: ${res.data.vendor_id}`)
         setTimeout(() => navigate('/vendors'), 2000)
       } else {
-        const msg = Array.isArray(data.error) ? data.error.join(', ') : (data.error || 'Registration failed.')
+        const msg = Array.isArray(res.data.error) ? res.data.error.join(', ') : (res.data.error || 'Registration failed.')
         setError(msg)
       }
-    } catch {
-      setError('Network error. Please try again.')
+    } catch (err) {
+      if (err.response) {
+        const data = err.response.data
+        const msg = Array.isArray(data?.error) ? data.error.join(', ') : (data?.error || 'Registration failed.')
+        setError(msg)
+      } else {
+        setError('Network error. Please try again.')
+      }
     } finally {
       setSubmitting(false)
     }

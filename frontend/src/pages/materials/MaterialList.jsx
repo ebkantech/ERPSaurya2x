@@ -1,12 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Search, Package, Upload, Download, Plus, X, Layers, List as ListIcon, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react'
-
-function getCookie(name) {
-  const value = `; ${document.cookie}`
-  const parts = value.split(`; ${name}=`)
-  if (parts.length === 2) return parts.pop().split(';').shift()
-  return ''
-}
+import api from '../../services/api'
 
 const MATERIAL_LIST_URL = '/materials/master/list/'
 const MATERIAL_IMPORT_URL = '/materials/master/import/'
@@ -47,16 +41,10 @@ function AddMaterialModal({ onClose, onCreated }) {
     setSubmitting(true)
     setError('')
     try {
-      const res = await fetch(MATERIAL_CREATE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') },
-        body: JSON.stringify(form),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || 'Could not add the material.')
-      onCreated(data.material)
+      const res = await api.post(MATERIAL_CREATE_URL, form)
+      onCreated(res.data.material)
     } catch (err) {
-      setError(err.message)
+      setError(err.response?.data?.error || 'Could not add the material.')
     } finally {
       setSubmitting(false)
     }
@@ -165,12 +153,10 @@ export default function MaterialList() {
     setLoading(true)
     setLoadError('')
     try {
-      const res = await fetch(MATERIAL_LIST_URL, { credentials: 'same-origin' })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || 'Failed to load materials.')
-      setRows(data.rows || [])
+      const res = await api.get(MATERIAL_LIST_URL)
+      setRows(res.data.rows || [])
     } catch (err) {
-      setLoadError(err.message || 'Failed to load materials.')
+      setLoadError(err.response?.data?.error || 'Failed to load materials.')
     } finally {
       setLoading(false)
     }
@@ -225,17 +211,13 @@ export default function MaterialList() {
     try {
       const formData = new FormData()
       formData.append('materialFile', file)
-      const res = await fetch(MATERIAL_IMPORT_URL, {
-        method: 'POST',
-        headers: { 'X-CSRFToken': getCookie('csrftoken') },
-        body: formData,
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || 'Failed to import the material Excel file.')
-      setNotice({ type: 'success', message: `${data.message} (${data.row_count} rows imported)` })
+      // Content-Type must be unset (not the client's default 'application/json')
+      // so axios/the browser can set multipart/form-data with the boundary itself.
+      const res = await api.post(MATERIAL_IMPORT_URL, formData, { headers: { 'Content-Type': undefined } })
+      setNotice({ type: 'success', message: `${res.data.message} (${res.data.row_count} rows imported)` })
       await fetchMaterials()
     } catch (err) {
-      setNotice({ type: 'error', message: err.message })
+      setNotice({ type: 'error', message: err.response?.data?.error || 'Failed to import the material Excel file.' })
     } finally {
       setImporting(false)
     }

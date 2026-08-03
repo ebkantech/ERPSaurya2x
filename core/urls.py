@@ -1,6 +1,12 @@
 from django.urls import path
 from . import views
 
+# NOTE: material_list_api, material_options_api, material_create_api,
+# import_material_master, clear_material_import, update_material_work_package,
+# create_project_master, save_project_distribution, register_vendor, and
+# update_vendor are also mounted under /api/... in omegaerp/urls.py — that is
+# the stable path new frontend code should call. The paths below are kept
+# working as thin aliases (same view function, unchanged) during migration.
 urlpatterns = [
     path('', views.index, name='index'),
     path('signout/', views.sign_out, name='sign-out'),

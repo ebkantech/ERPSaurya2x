@@ -6,6 +6,19 @@ from django.http import HttpResponse
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.static import serve as static_serve
 from search.views import api_chat, api_search
+from core.views import (
+    material_list_api,
+    material_options_api,
+    material_create_api,
+    import_material_master,
+    clear_material_import,
+    update_material_work_package,
+    create_project_master,
+    save_project_distribution,
+    register_vendor,
+    update_vendor,
+)
+from purchase_orders.views import purchase_order_bulk_check
 import os
 
 admin.site.site_header = 'OmegaERP Admin Panel'
@@ -32,6 +45,25 @@ urlpatterns = [
 
     # Session auth API for the React app
     path('api/auth/', include('accounts.urls')),
+
+    # --- Stable /api/ aliases for JSON endpoints historically only exposed
+    # under template-serving prefixes (core.urls, purchase_orders.urls).
+    # Each entry points at the exact same view function as the legacy path
+    # below it (see core/urls.py, purchase_orders/urls.py) — same queryset,
+    # same permission check, same business logic, just a second URL. The
+    # legacy paths are kept working as thin aliases so nothing breaks
+    # mid-migration; new frontend code should call these /api/ paths only.
+    path('api/materials/master/list/', material_list_api, name='api-material-master-list'),
+    path('api/materials/master/options/', material_options_api, name='api-material-master-options'),
+    path('api/materials/master/create/', material_create_api, name='api-material-master-create'),
+    path('api/materials/master/import/', import_material_master, name='api-material-master-import'),
+    path('api/materials/master/clear/', clear_material_import, name='api-material-master-clear'),
+    path('api/materials/master/work-package/', update_material_work_package, name='api-material-master-work-package'),
+    path('api/projects/master/create/', create_project_master, name='api-project-master-create'),
+    path('api/projects/distribution/save/', save_project_distribution, name='api-project-distribution-save'),
+    path('api/vendors/register/', register_vendor, name='api-vendor-register'),
+    path('api/vendors/<str:vendor_id>/update/', update_vendor, name='api-vendor-update'),
+    path('api/purchase-orders/bulk-generate/check/', purchase_order_bulk_check, name='api-po-bulk-check'),
 
     # Django backend modules (templates + JSON endpoints)
     path('administration/', include('administration.urls')),

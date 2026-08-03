@@ -4,6 +4,7 @@ import {
   Pencil, Plus, Trash2, Loader2, AlertCircle, CheckCircle2, ShieldCheck, Save, X, ArrowLeft, Download,
   Eye, Send, UserSquare2,
 } from 'lucide-react'
+import api from '../../services/api'
 
 function getCookie(name) {
   const value = `; ${document.cookie}`
@@ -118,9 +119,8 @@ export default function QuotationDetail() {
   }, [])
 
   useEffect(() => {
-    fetch(MATERIAL_OPTIONS_URL, { credentials: 'same-origin' })
-      .then((res) => res.json())
-      .then((data) => setMaterialOptions(data.results || []))
+    api.get(MATERIAL_OPTIONS_URL)
+      .then((res) => setMaterialOptions(res.data.results || []))
       .catch(() => setMaterialOptions([]))
   }, [])
 

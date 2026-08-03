@@ -6,6 +6,8 @@ urlpatterns = [
     path('', views.procurement_dashboard, name='procurement-dashboard'),
     path('purchase-orders/', views.purchase_order_master, name='purchase-order-master'),
     path('purchase-orders/bulk-generate/', views.purchase_order_bulk_generator, name='purchase-order-bulk-generator'),
+    # Also mounted at /api/purchase-orders/bulk-generate/check/ in omegaerp/urls.py
+    # (same view, unchanged) — that's the stable path new frontend code should call.
     path('purchase-orders/bulk-generate/check/', views.purchase_order_bulk_check, name='purchase-order-bulk-check'),
     path('purchase-orders/<int:pk>/', views.purchase_order_detail, name='purchase-order-detail'),
     path('api/dashboard/', views.purchase_order_dashboard_api, name='purchase-order-dashboard-api'),
