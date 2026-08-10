@@ -1,6 +1,5 @@
 import datetime
 import json
-import os
 import traceback
 import zipfile
 from collections import defaultdict
@@ -13,7 +12,6 @@ from django.contrib.auth.decorators import login_required
 from django.http import Http404
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
-from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .import_utils import (
@@ -1220,51 +1218,3 @@ def media_blob_proxy(request, blob_path):
 def sign_out(request):
     logout(request)
     return redirect('/admin/login/')
-
-
-def db_diagnostics(request):
-    """TEMPORARY token-gated probe: reports which database the running app is
-    actually connected to and whether a write round-trips. Login is NOT
-    required on purpose — DB-backed sessions don't persist when the DB is
-    ephemeral, which would otherwise make this endpoint unreachable. Gated by
-    a URL token instead. Remove once the deployment DB config is confirmed."""
-    from django.db import connection
-
-    if request.GET.get('token') != 'omega-dbcheck-7f3a9c2e':
-        return JsonResponse({'error': 'forbidden'}, status=403)
-
-    d = connection.settings_dict
-    info = {
-        'engine': d.get('ENGINE', ''),
-        'host': d.get('HOST', ''),          # host only — never the password
-        'name': d.get('NAME', ''),
-        'port': str(d.get('PORT', '')),
-        'conn_max_age': d.get('CONN_MAX_AGE', ''),
-        'settings_module': os.environ.get('DJANGO_SETTINGS_MODULE', ''),
-        'database_url_present': bool(os.environ.get('DATABASE_URL')),
-        'session_engine': getattr(settings, 'SESSION_ENGINE', 'django.contrib.sessions.backends.db'),
-        # Which DB connection-string env vars production actually has (names
-        # only, never values) — tells us exactly which one to rely on.
-        'db_env_vars_present': {
-            k: bool(os.environ.get(k)) for k in [
-                'DATABASE_URL', 'POSTGRES_URL', 'POSTGRES_PRISMA_URL',
-                'DATABASE_URL_UNPOOLED', 'POSTGRES_URL_NON_POOLING',
-            ]
-        },
-    }
-    try:
-        info['project_count'] = ProjectMaster.objects.count()
-        info['vendor_count'] = Vendor.objects.count()
-        # Prove a write actually persists on this connection.
-        probe = ProjectMaster.objects.create(
-            project_name=f'__db_probe__ {timezone.now().isoformat()}',
-            procurement_source='diagnostic', business_unit='diagnostic',
-            total_mw=Decimal('0.01'), status='active',
-        )
-        info['write_probe_id'] = probe.id
-        info['write_probe_code'] = probe.project_code
-        probe.delete()  # clean up immediately
-        info['write_probe'] = 'ok (insert+delete round-tripped)'
-    except Exception as exc:
-        info['write_probe'] = f'FAILED: {type(exc).__name__}: {exc}'
-    return JsonResponse(info)
