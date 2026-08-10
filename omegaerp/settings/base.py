@@ -138,6 +138,21 @@ SERVER_EMAIL = env('SERVER_EMAIL', default=DEFAULT_FROM_EMAIL)
 OPENAI_API_KEY = env('OPENAI_API_KEY', default='')
 THIRD_PARTY_API_KEY = env('THIRD_PARTY_API_KEY', default='')
 
+# --- Razorpay (vendor onboarding-fee gateway) ---------------------------
+# The onboarding fee is collected by emailing the vendor a Razorpay Payment
+# Link; the vendor pays it out-of-band and a webhook reconciles the record, so
+# registration is never blocked on payment. Leave the keys blank in dev to keep
+# the gateway disabled: payments.gateway reports enabled=False and the Payment
+# step hides the "send link" action. Set all three (test or live) in the
+# environment to switch it on.
+RAZORPAY_KEY_ID = env('RAZORPAY_KEY_ID', default='')
+RAZORPAY_KEY_SECRET = env('RAZORPAY_KEY_SECRET', default='')
+RAZORPAY_WEBHOOK_SECRET = env('RAZORPAY_WEBHOOK_SECRET', default='')
+# Onboarding fee charged per vendor registration, in major currency units
+# (e.g. 2500 = ₹2,500.00). Set to 0 to disable the fee even when keys exist.
+VENDOR_REGISTRATION_FEE = env.int('VENDOR_REGISTRATION_FEE', default=2500)
+VENDOR_REGISTRATION_FEE_CURRENCY = env('VENDOR_REGISTRATION_FEE_CURRENCY', default='INR')
+
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 SECURE_REFERRER_POLICY = 'same-origin'

@@ -17,6 +17,7 @@ from core.views import (
     save_project_distribution,
     register_vendor,
     update_vendor,
+    vendor_list_api,
 )
 from purchase_orders.views import purchase_order_bulk_check
 import os
@@ -61,8 +62,12 @@ urlpatterns = [
     path('api/materials/master/work-package/', update_material_work_package, name='api-material-master-work-package'),
     path('api/projects/master/create/', create_project_master, name='api-project-master-create'),
     path('api/projects/distribution/save/', save_project_distribution, name='api-project-distribution-save'),
+    path('api/vendors/', vendor_list_api, name='api-vendor-list'),
     path('api/vendors/register/', register_vendor, name='api-vendor-register'),
     path('api/vendors/<str:vendor_id>/update/', update_vendor, name='api-vendor-update'),
+
+    # Vendor onboarding-fee payment gateway (Razorpay)
+    path('api/payments/', include('payments.urls')),
     path('api/purchase-orders/bulk-generate/check/', purchase_order_bulk_check, name='api-po-bulk-check'),
 
     # Django backend modules (templates + JSON endpoints)

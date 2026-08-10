@@ -1,11 +1,13 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Building2, User, FileText, CreditCard, CheckCircle, Loader2 } from 'lucide-react'
+import { ArrowLeft, Building2, User, FileText, CreditCard, Wallet, ShieldCheck, CheckCircle, Loader2, Send, Copy } from 'lucide-react'
 import api from '../../services/api'
 
 const VENDOR_REGISTER_URL = '/vendors/register/'
+const PAY_CONFIG_URL = '/payments/vendor-registration/config/'
+const PAY_SEND_LINK_URL = '/payments/vendor-registration/send-link/'
 
-const SECTIONS = ['Company', 'Contact', 'KYC', 'Financial']
+const SECTIONS = ['Company', 'Contact', 'KYC', 'Financial', 'Payment']
 
 const Field = ({ label, required, children }) => (
   <div>
@@ -46,6 +48,26 @@ export default function VendorCreate() {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
 
+  // Payment gateway state. `payConfig.enabled` decides whether an onboarding
+  // fee is collected at all; when disabled the Payment step just shows the
+  // Register button (pre-gateway behaviour). The vendor pays the fee from a
+  // Razorpay Payment Link emailed to them, so this is out-of-band and does
+  // not block registration.
+  const [payConfig, setPayConfig] = useState(null)
+  const [sendingLink, setSendingLink] = useState(false)
+  const [payError, setPayError] = useState('')
+  const [paymentReceipt, setPaymentReceipt] = useState('')
+  const [linkInfo, setLinkInfo] = useState(null) // { payment_link_url, sent_to }
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    api.get(PAY_CONFIG_URL)
+      .then(res => { if (active) setPayConfig(res.data) })
+      .catch(() => { if (active) setPayConfig({ enabled: false }) })
+    return () => { active = false }
+  }, [])
+
   const [form, setForm] = useState({
     companyName: '', address: '', address2: '', city: '', state: '', pin: '', country: 'India',
     vendorType: '', vendorCategory: '', contactPerson: '', emailId: '',
@@ -62,6 +84,40 @@ export default function VendorCreate() {
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.type === 'file' ? e.target.files[0] : e.target.value }))
 
+  const feeEnabled = !!payConfig?.enabled
+
+  // Generate a Razorpay Payment Link for the onboarding fee and have Razorpay
+  // email it to the vendor. The vendor pays it later from their inbox; a
+  // webhook reconciles the payment. We keep the returned receipt so the
+  // registration submit can link the pending payment to this vendor.
+  const handleSendLink = async () => {
+    setPayError('')
+    setSendingLink(true)
+    try {
+      const res = await api.post(PAY_SEND_LINK_URL, {
+        companyName: form.companyName,
+        contactPerson: form.contactPerson,
+        emailId: form.emailId,
+        mobileNumber: form.mobileNumber,
+      })
+      setLinkInfo(res.data)
+      setPaymentReceipt(res.data.receipt)
+    } catch (err) {
+      setPayError(err.response?.data?.error || err.message || 'Could not send the payment link. Please try again.')
+    } finally {
+      setSendingLink(false)
+    }
+  }
+
+  const copyLink = async () => {
+    if (!linkInfo?.payment_link_url) return
+    try {
+      await navigator.clipboard.writeText(linkInfo.payment_link_url)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch { /* clipboard blocked — the link is still shown for manual copy */ }
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
@@ -71,6 +127,7 @@ export default function VendorCreate() {
     Object.entries(form).forEach(([k, v]) => {
       if (v !== null && v !== undefined && v !== '') fd.append(k, v)
     })
+    if (paymentReceipt) fd.append('payment_reference', paymentReceipt)
 
     try {
       // Content-Type must be unset (not the client's default 'application/json')
@@ -104,7 +161,7 @@ export default function VendorCreate() {
     }
   }
 
-  const sectionIcons = [Building2, User, FileText, CreditCard]
+  const sectionIcons = [Building2, User, FileText, CreditCard, Wallet]
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-8">
@@ -361,6 +418,83 @@ export default function VendorCreate() {
 
             <div className="flex justify-between pt-4 border-t border-surface-100 mt-2">
               <button type="button" onClick={() => setStep(2)} className="btn-secondary">← Back</button>
+              <button type="button" onClick={() => setStep(4)} className="btn-primary">Next: Payment →</button>
+            </div>
+          </div>
+        )}
+
+        {/* Section 4 — Payment (onboarding fee link) */}
+        {step === 4 && (
+          <div className="card p-6 space-y-4">
+            <h3 className="font-semibold text-slate-900 text-sm border-b border-surface-100 pb-3">Onboarding Fee Payment</h3>
+
+            {payConfig === null ? (
+              <div className="flex items-center gap-2 text-sm text-slate-500 py-6">
+                <Loader2 size={15} className="animate-spin" />Checking payment requirements…
+              </div>
+            ) : !feeEnabled ? (
+              <div className="bg-slate-50 border border-surface-200 text-slate-600 text-sm rounded-xl px-4 py-3">
+                No onboarding fee is required for this registration. You can submit directly.
+              </div>
+            ) : linkInfo ? (
+              <div className="space-y-3">
+                <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm rounded-xl px-4 py-3 flex items-start gap-2">
+                  <CheckCircle size={16} className="mt-0.5 shrink-0" />
+                  <span>Payment link sent to <span className="font-medium">{linkInfo.sent_to}</span>. The vendor pays the fee from that link — you can register the vendor now; the payment is tracked separately.</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    readOnly
+                    value={linkInfo.payment_link_url}
+                    className="flex-1 px-3 py-2 text-sm border border-surface-200 rounded-lg bg-slate-50 text-slate-700 font-mono truncate"
+                  />
+                  <button type="button" onClick={copyLink}
+                    className="btn-secondary flex items-center gap-1.5 whitespace-nowrap">
+                    <Copy size={14} />{copied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+                <button type="button" onClick={handleSendLink} disabled={sendingLink}
+                  className="text-xs text-slate-500 hover:text-slate-700 underline">
+                  {sendingLink ? 'Resending…' : 'Resend a fresh link'}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between rounded-xl border border-surface-200 bg-white px-4 py-4">
+                  <div>
+                    <p className="text-xs text-slate-500">Registration fee</p>
+                    <p className="text-2xl font-bold text-slate-900">
+                      {payConfig.currency === 'INR' ? '₹' : ''}{payConfig.amount_display} {payConfig.currency}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                    <ShieldCheck size={14} />Secured by Razorpay
+                  </div>
+                </div>
+
+                {payError && (
+                  <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl px-4 py-3">
+                    {payError}
+                  </div>
+                )}
+
+                <button type="button" onClick={handleSendLink} disabled={sendingLink || !form.emailId}
+                  className="btn-primary w-full flex items-center justify-center gap-2"
+                >
+                  {sendingLink
+                    ? <><Loader2 size={15} className="animate-spin" />Sending link…</>
+                    : <><Send size={15} />Send payment link to vendor</>}
+                </button>
+                <p className="text-xs text-slate-400 text-center">
+                  {form.emailId
+                    ? <>The link will be emailed to <span className="font-medium">{form.emailId}</span> for the vendor to pay.</>
+                    : 'Add the vendor’s email in the Contact step to send a payment link.'}
+                </p>
+              </div>
+            )}
+
+            <div className="flex justify-between pt-4 border-t border-surface-100 mt-2">
+              <button type="button" onClick={() => setStep(3)} className="btn-secondary">← Back</button>
               <button type="submit" disabled={submitting}
                 className="btn-primary min-w-[160px] flex items-center justify-center gap-2"
               >

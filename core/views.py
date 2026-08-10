@@ -236,6 +236,62 @@ def _serialize_vendor_detail_rows(queryset):
     return [_serialize_vendor_detail(vendor) for vendor in queryset]
 
 
+def _serialize_vendor_list_rows(queryset):
+    """Compact rows for the vendor list, annotated with onboarding-payment
+    state so the UI can show a Registered/Pending badge and surface the
+    payment link for vendors who still owe the fee."""
+    from payments.models import VendorRegistrationPayment
+
+    vendor_ids = [v.id for v in queryset]
+    # Latest payment per vendor (queryset ordered newest-first below).
+    latest_by_vendor = {}
+    if vendor_ids:
+        for payment in VendorRegistrationPayment.objects.filter(
+            vendor_id__in=vendor_ids
+        ).order_by('vendor_id', '-created_at'):
+            latest_by_vendor.setdefault(payment.vendor_id, payment)
+
+    paid_statuses = (
+        VendorRegistrationPayment.STATUS_PAID,
+        VendorRegistrationPayment.STATUS_LINKED,
+    )
+
+    rows = []
+    for vendor in queryset:
+        payment = latest_by_vendor.get(vendor.id)
+        is_paid = bool(payment and payment.status in paid_statuses)
+        # "Finally registered" only when not awaiting payment.
+        awaiting_payment = (vendor.status == 'pending_payment') and not is_paid
+        rows.append({
+            'vendor_id': vendor.vendor_id or '',
+            'company_name': vendor.company_name or '',
+            'vendor_category': vendor.vendor_category or '',
+            'city': vendor.city or '',
+            'state': vendor.state or '',
+            'contact_person': vendor.contact_person or '',
+            'email_id': vendor.email_id or '',
+            'msme': bool(vendor.msme_reg),
+            'status': vendor.status or 'active',
+            'registration_status': 'pending_payment' if awaiting_payment else 'registered',
+            'registration_paid': is_paid,
+            'payment_status': payment.status if payment else '',
+            'payment_amount': str(payment.amount) if payment else '',
+            'payment_currency': payment.currency if payment else '',
+            # Only expose the link while the fee is still owed.
+            'payment_link_url': (payment.payment_link_url if (payment and not is_paid) else ''),
+            'created_at': vendor.created_at.strftime('%d %b %Y') if vendor.created_at else '',
+        })
+    return rows
+
+
+@login_required(login_url='/admin/login/')
+def vendor_list_api(request):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    vendors = Vendor.objects.order_by('-created_at')
+    return JsonResponse({'vendors': _serialize_vendor_list_rows(vendors)})
+
+
 def _clean_vendor_clients(value):
     if isinstance(value, list):
         raw_items = value
@@ -944,12 +1000,55 @@ def register_vendor(request):
         if errors:
             return JsonResponse({'error': errors}, status=400)
 
+        # The onboarding fee is what "finally registers" a vendor. Under an
+        # enabled gateway the vendor is created in a `pending_payment` state
+        # with a Razorpay Payment Link attached (shown on the vendor list);
+        # the webhook promotes it to `active` once the vendor pays. If the
+        # gateway is disabled, the vendor is `active` immediately as before.
+        from payments.gateway import GatewayError, is_enabled as payment_gateway_enabled
+        from payments.models import VendorRegistrationPayment
+        from payments.services import create_registration_payment_link
+
+        reference = (request.POST.get('payment_reference') or '').strip()
+        payment = None
+        if reference:
+            payment = VendorRegistrationPayment.objects.filter(
+                receipt=reference,
+                vendor__isnull=True,
+            ).first()
+
         vendor = Vendor(**cleaned_data)
         vendor.save()
 
         if 'bankProofFile' in request.FILES:
             vendor.passbook_file = request.FILES['bankProofFile']
             vendor.save()
+
+        # No link came from the payment step but the gateway is on → mint one
+        # now so every pending vendor carries a payment link on the list.
+        if payment is None and payment_gateway_enabled():
+            try:
+                payment = create_registration_payment_link(
+                    company_name=vendor.company_name,
+                    contact_name=vendor.contact_person,
+                    contact_email=vendor.email_id,
+                    contact_phone=vendor.mobile_number,
+                    vendor=vendor,
+                )
+            except GatewayError:
+                traceback.print_exc()
+                payment = None  # never fail registration on a gateway hiccup
+
+        if payment is not None:
+            payment.vendor = vendor
+            if payment.status == VendorRegistrationPayment.STATUS_PAID:
+                # Paid before the vendor existed → fully reconciled + active.
+                payment.status = VendorRegistrationPayment.STATUS_LINKED
+            else:
+                # Awaiting payment → not finally registered yet.
+                vendor.status = 'pending_payment'
+                vendor.save(update_fields=['status'])
+            payment.save(update_fields=['vendor', 'status', 'updated_at'])
 
         return JsonResponse({'vendor_id': vendor.vendor_id})
     except Exception as e:
