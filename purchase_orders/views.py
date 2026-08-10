@@ -664,3 +664,317 @@ def purchase_order_detail_api(request, pk):
         'payments': list(po.payments.values('payment_reference_code', 'payment_stage', 'net_payable', 'payment_status')),
     })
     return JsonResponse(payload)
+
+
+# ---------------------------------------------------------------------------
+# Purchase-order detail write API
+#
+# These endpoints decompose the many POST action branches of the HTML
+# ``purchase_order_detail`` view into granular JSON create/update endpoints.
+# Each reuses the same Django form the HTML view used (so validation stays in
+# one place) and fires the same activity/audit side-effects.
+# ---------------------------------------------------------------------------
+
+def _api_require_post(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    return None
+
+
+def _api_validation_error(form):
+    return JsonResponse(
+        {'error': 'Please correct the errors and try again.', 'field_errors': form.errors},
+        status=400,
+    )
+
+
+def _api_get_po(pk):
+    return get_object_or_404(PurchaseOrder.objects.select_related('vendor'), pk=pk)
+
+
+def purchase_order_update_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = PurchaseOrderForm(request.POST, request.FILES, instance=po)
+    if not form.is_valid():
+        return _api_validation_error(form)
+    form.save()
+    _log_activity(po, 'po_updated', 'PO master details updated.', request.user)
+    _log_system_po_event(
+        request.user,
+        SystemAuditLog.ACTION_PO_CHANGE,
+        'purchase_orders',
+        f'Updated purchase order {po.po_number}.',
+        po,
+    )
+    po.refresh_progress()
+    return JsonResponse({'message': 'Purchase order updated.', 'po': serialize_purchase_order(po)})
+
+
+def po_item_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = PurchaseOrderItemForm(request.POST)
+    if not form.is_valid():
+        return _api_validation_error(form)
+    item = form.save(commit=False)
+    item.po = po
+    item.save()
+    _log_activity(po, 'item_added', f'Added PO item {item.material_name}.', request.user)
+    return JsonResponse({
+        'message': 'Item added.',
+        'item': {
+            'id': item.id,
+            'material_category': item.material_category,
+            'material_name': item.material_name,
+            'ordered_quantity': item.ordered_quantity,
+            'delivered_quantity': item.delivered_quantity,
+            'pending_quantity': item.pending_quantity,
+        },
+    }, status=201)
+
+
+def po_reference_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = PurchaseOrderReferenceCodeForm(request.POST, request.FILES)
+    if not form.is_valid():
+        return _api_validation_error(form)
+    reference = form.save(commit=False)
+    reference.po = po
+    reference.save()
+    _log_activity(po, 'reference_added', f'Added reference code {reference.reference_code}.', request.user)
+    return JsonResponse({
+        'message': 'Reference code added.',
+        'reference': {
+            'id': reference.id,
+            'reference_code': reference.reference_code,
+            'reference_type': reference.reference_type,
+            'date': reference.date,
+        },
+    }, status=201)
+
+
+def po_delivery_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = DeliveryForm(request.POST, request.FILES)
+    form.fields['po_item'].queryset = po.items.all()
+    if not form.is_valid():
+        return _api_validation_error(form)
+    delivery = form.save(commit=False)
+    delivery.po = po
+    delivery.save()
+    _log_activity(po, 'delivery_added', f'Added delivery {delivery.delivery_reference_code}.', request.user)
+    _log_system_po_event(
+        request.user,
+        SystemAuditLog.ACTION_PO_CHANGE,
+        'deliveries',
+        f'Added delivery {delivery.delivery_reference_code} against {po.po_number}.',
+        po,
+        {'delivery_reference_code': delivery.delivery_reference_code},
+    )
+    log_vendor_activity(
+        po.vendor,
+        VendorActivityLog.TYPE_DELIVERY_UPDATED,
+        f'Delivery {delivery.delivery_reference_code} recorded for {delivery.po_item.material_name}.',
+        request.user,
+    )
+    return JsonResponse({
+        'message': 'Delivery recorded.',
+        'delivery': {
+            'id': delivery.id,
+            'delivery_reference_code': delivery.delivery_reference_code,
+            'delivery_date': delivery.delivery_date,
+            'delivered_quantity': delivery.delivered_quantity,
+            'delivery_status': delivery.delivery_status,
+        },
+    }, status=201)
+
+
+def po_vehicle_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = VehicleMovementForm(request.POST)
+    if 'delivery' in form.fields:
+        form.fields['delivery'].queryset = po.deliveries.all()
+    if not form.is_valid():
+        return _api_validation_error(form)
+    delivery_id = request.POST.get('delivery')
+    if not delivery_id:
+        return JsonResponse({'error': 'A delivery is required for the vehicle movement.', 'field_errors': {'delivery': ['This field is required.']}}, status=400)
+    delivery = get_object_or_404(po.deliveries, pk=delivery_id)
+    vehicle = form.save(commit=False)
+    vehicle.delivery = delivery
+    vehicle.save()
+    _log_activity(po, 'vehicle_added', f'Added vehicle {vehicle.vehicle_number}.', request.user)
+    return JsonResponse({
+        'message': 'Vehicle movement added.',
+        'vehicle': {
+            'id': vehicle.id,
+            'vehicle_number': vehicle.vehicle_number,
+            'vehicle_status': vehicle.vehicle_status,
+            'delivery_id': delivery.id,
+        },
+    }, status=201)
+
+
+def po_invoice_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = DeliveryInvoiceChallanForm(request.POST, request.FILES)
+    form.fields['delivery'].queryset = po.deliveries.all()
+    if not form.is_valid():
+        return _api_validation_error(form)
+    invoice = form.save(commit=False)
+    invoice.po = po
+    invoice.save()
+    _log_activity(po, 'invoice_added', f'Recorded invoice/challan {invoice.invoice_number or invoice.challan_number}.', request.user)
+    return JsonResponse({
+        'message': 'Invoice/challan recorded.',
+        'invoice': {
+            'id': invoice.id,
+            'invoice_number': invoice.invoice_number,
+            'challan_number': invoice.challan_number,
+        },
+    }, status=201)
+
+
+def po_payment_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = VendorPaymentForm(request.POST, request.FILES)
+    form.fields['related_delivery'].queryset = po.deliveries.all()
+    form.fields['related_invoice'].queryset = po.invoice_challans.all()
+    if not form.is_valid():
+        return _api_validation_error(form)
+    payment = form.save(commit=False)
+    payment.po = po
+    payment.vendor = po.vendor
+    payment.save()
+    _log_activity(po, 'payment_added', f'Added payment reference {payment.payment_reference_code}.', request.user)
+    _log_system_po_event(
+        request.user,
+        SystemAuditLog.ACTION_PAYMENT_UPDATE,
+        'payments',
+        f'Logged payment {payment.payment_reference_code} for {po.po_number}.',
+        po,
+        {'payment_reference_code': payment.payment_reference_code},
+    )
+    log_vendor_activity(
+        po.vendor,
+        VendorActivityLog.TYPE_PAYMENT_FOLLOWUP,
+        f'Payment stage {payment.get_payment_stage_display()} logged with reference {payment.payment_reference_code}.',
+        request.user,
+    )
+    return JsonResponse({
+        'message': 'Payment logged.',
+        'payment': {
+            'id': payment.id,
+            'payment_reference_code': payment.payment_reference_code,
+            'payment_stage': payment.payment_stage,
+            'net_payable': payment.net_payable,
+            'payment_status': payment.payment_status,
+        },
+    }, status=201)
+
+
+def po_document_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = BusinessDocumentForm(request.POST, request.FILES)
+    form.fields['delivery'].queryset = po.deliveries.all()
+    form.fields['vehicle'].queryset = VehicleMovement.objects.filter(delivery__po=po)
+    form.fields['payment'].queryset = po.payments.all()
+    form.fields['reference_code'].queryset = po.reference_codes.all()
+    if not form.is_valid():
+        return _api_validation_error(form)
+    document = form.save(commit=False)
+    document.po = po
+    document.uploaded_by = request.user if request.user.is_authenticated else None
+    document.save()
+    _log_activity(po, 'document_added', f'Uploaded document {document.title}.', request.user)
+    _log_system_po_event(
+        request.user,
+        SystemAuditLog.ACTION_PO_CHANGE,
+        'documents',
+        f'Uploaded document {document.title} for {po.po_number}.',
+        po,
+        {'document_title': document.title},
+    )
+    log_vendor_activity(
+        po.vendor,
+        VendorActivityLog.TYPE_DOCUMENT_UPLOADED,
+        f'Document uploaded: {document.title}.',
+        request.user,
+    )
+    return JsonResponse({
+        'message': 'Document uploaded.',
+        'document': {
+            'id': document.id,
+            'title': document.title,
+        },
+    }, status=201)
+
+
+def po_activity_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = PurchaseOrderActivityLogForm(request.POST)
+    if not form.is_valid():
+        return _api_validation_error(form)
+    entry = form.save(commit=False)
+    entry.po = po
+    entry.actor = request.user if request.user.is_authenticated else None
+    entry.save()
+    return JsonResponse({
+        'message': 'Activity logged.',
+        'activity': {
+            'id': entry.id,
+            'action': entry.action,
+            'description': entry.description,
+        },
+    }, status=201)
+
+
+def po_notification_create_api(request, pk):
+    error = _api_require_post(request)
+    if error:
+        return error
+    po = _api_get_po(pk)
+    form = NotificationLogForm(request.POST)
+    if 'delivery' in form.fields:
+        form.fields['delivery'].queryset = po.deliveries.all()
+    if 'payment' in form.fields:
+        form.fields['payment'].queryset = po.payments.all()
+    if not form.is_valid():
+        return _api_validation_error(form)
+    notification = form.save(commit=False)
+    notification.po = po
+    notification.save()
+    _log_activity(po, 'notification_logged', f'Logged {notification.channel} notification.', request.user)
+    return JsonResponse({
+        'message': 'Notification logged.',
+        'notification': {
+            'id': notification.id,
+            'channel': notification.channel,
+        },
+    }, status=201)

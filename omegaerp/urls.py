@@ -6,6 +6,20 @@ from django.http import HttpResponse
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.static import serve as static_serve
 from search.views import api_chat, api_search
+from core.views import (
+    material_list_api,
+    material_options_api,
+    material_create_api,
+    import_material_master,
+    clear_material_import,
+    update_material_work_package,
+    create_project_master,
+    save_project_distribution,
+    register_vendor,
+    update_vendor,
+    vendor_list_api,
+)
+from purchase_orders.views import purchase_order_bulk_check
 import os
 
 admin.site.site_header = 'OmegaERP Admin Panel'
@@ -33,6 +47,29 @@ urlpatterns = [
     # Session auth API for the React app
     path('api/auth/', include('accounts.urls')),
 
+    # --- Stable /api/ aliases for JSON endpoints historically only exposed
+    # under template-serving prefixes (core.urls, purchase_orders.urls).
+    # Each entry points at the exact same view function as the legacy path
+    # below it (see core/urls.py, purchase_orders/urls.py) — same queryset,
+    # same permission check, same business logic, just a second URL. The
+    # legacy paths are kept working as thin aliases so nothing breaks
+    # mid-migration; new frontend code should call these /api/ paths only.
+    path('api/materials/master/list/', material_list_api, name='api-material-master-list'),
+    path('api/materials/master/options/', material_options_api, name='api-material-master-options'),
+    path('api/materials/master/create/', material_create_api, name='api-material-master-create'),
+    path('api/materials/master/import/', import_material_master, name='api-material-master-import'),
+    path('api/materials/master/clear/', clear_material_import, name='api-material-master-clear'),
+    path('api/materials/master/work-package/', update_material_work_package, name='api-material-master-work-package'),
+    path('api/projects/master/create/', create_project_master, name='api-project-master-create'),
+    path('api/projects/distribution/save/', save_project_distribution, name='api-project-distribution-save'),
+    path('api/vendors/', vendor_list_api, name='api-vendor-list'),
+    path('api/vendors/register/', register_vendor, name='api-vendor-register'),
+    path('api/vendors/<str:vendor_id>/update/', update_vendor, name='api-vendor-update'),
+
+    # Vendor onboarding-fee payment gateway (Razorpay)
+    path('api/payments/', include('payments.urls')),
+    path('api/purchase-orders/bulk-generate/check/', purchase_order_bulk_check, name='api-po-bulk-check'),
+
     # Django backend modules (templates + JSON endpoints)
     path('administration/', include('administration.urls')),
     path('procurement/', include('purchase_orders.urls')),
@@ -46,13 +83,52 @@ urlpatterns = [
     # Core routes (vendors/list, projects, materials, vendor AJAX APIs)
     path('', include('core.urls')),
 
+    # --- React-owned sub-paths under prefixes core.urls also uses ---
+    # core.urls declares vendors/, projects/, materials/ as prefixes, and the
+    # React router (frontend/src/App.jsx) independently owns other sub-paths
+    # under those same prefixes (vendors/new, projects/solar-tracker, the
+    # materials/quotations/* flow, etc). Everything core.urls actually
+    # defines already matched above this point and never reaches these
+    # entries. Listing the known React sub-paths explicitly lets the
+    # tightened catch-all below safely 404 anything else under these
+    # prefixes instead of silently serving the SPA for a broken/renamed
+    # Django route. Keep this in sync with App.jsx.
+    # DEAD until the matching core.urls entry below is removed (Step 2 of the
+    # migration): include('core.urls') above already claims these exact
+    # prefixes ('vendors/', 'projects/', 'materials/') and matches first, so
+    # these three lines can never fire today. Left in place so the route
+    # exists the moment core.urls stops claiming it — do not delete yet.
+    re_path(r'^vendors/?$', _react_index),
+    re_path(r'^vendors/[^/]+/?$', _react_index),                        # vendors/new, vendors/<id>
+    # DEAD — see comment above; core.urls still claims 'projects/'.
+    re_path(r'^projects/?$', _react_index),
+    re_path(r'^projects/new/?$', _react_index),
+    re_path(r'^projects/solar-tracker/?$', _react_index),
+    # DEAD — see comment above; core.urls still claims 'materials/'.
+    re_path(r'^materials/?$', _react_index),
+    re_path(r'^materials/quotations/?$', _react_index),
+    re_path(r'^materials/quotations/new/?$', _react_index),
+    re_path(r'^materials/quotations/[^/]+/?$', _react_index),           # quotations/<id>
+    re_path(r'^materials/quotations/[^/]+/preview/?$', _react_index),   # quotations/<id>/preview
+
     # React build assets — served from frontend/dist/assets/
     re_path(r'^assets/(?P<path>.*)$', static_serve,
             {'document_root': os.path.join(_REACT_DIST, 'assets')}),
 
-    # Catch-all: any route not matched by Django serves the React app
-    # (React Router handles client-side navigation from there)
-    re_path(r'^.*$', _react_index),
+    # Catch-all: serves the React app for everything else React owns
+    # (dashboard, purchase-orders, deliveries, payments, transport, tasks,
+    # reports, notifications, assistant, administration, login, and the
+    # client-side 404 page). Paths under prefixes Django exclusively owns
+    # (admin/, api/, static/, administration/, procurement/, vendor-control/,
+    # signout/, media/) — plus anything under vendors/, projects/,
+    # materials/ not explicitly allowed above — are excluded, so a broken
+    # or renamed Django route now returns a real 404 instead of silently
+    # rendering the SPA shell.
+    re_path(
+        r'^(?!admin/|api/|static/|administration/|procurement/|vendor-control/'
+        r'|signout/|media/|vendors/|projects/|materials/).*$',
+        _react_index,
+    ),
 ]
 
 if settings.DEBUG:

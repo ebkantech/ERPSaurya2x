@@ -20,8 +20,10 @@ from core.models import Vendor
 from notifications.models import Notification
 from notifications.services import create_notification
 from permissions.utils import (
+    can_create_vendors,
     ensure_vendor_access,
     ensure_vendor_write_access,
+    get_accessible_task_queryset,
     get_accessible_vendor_queryset,
     get_active_vendor_assignments,
     get_staff_profile,
@@ -208,6 +210,9 @@ def vendor_master(request):
         vendors = vendors.filter(status=status_filter)
 
     if request.method == 'POST':
+        if not can_create_vendors(request.user):
+            messages.error(request, 'You do not have permission to create vendors.')
+            return redirect('procurement-vendor-master')
         form = VendorMasterForm(request.POST)
         if form.is_valid():
             vendor = form.save(commit=False)

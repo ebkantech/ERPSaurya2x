@@ -20,3 +20,9 @@ pgvector
 # Quotation PDF export — pure Python, no system binary, safe for the
 # Vercel serverless bundle (unlike sentence-transformers/faiss-cpu above).
 reportlab>=4.0.0
+
+# Razorpay payment gateway — vendor onboarding-fee collection. Pure-Python
+# SDK (just wraps the REST API + HMAC signature check), safe for the Vercel
+# bundle. Every import of it in payments/ is function-scoped so the app still
+# boots (with the gateway reported as disabled) if the package is absent.
+razorpay>=1.4.2

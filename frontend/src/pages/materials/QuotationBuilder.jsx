@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   Upload, Plus, Trash2, Loader2, AlertCircle, CheckCircle2, PackageSearch, ShieldCheck, Save, Send, UserSquare2,
 } from 'lucide-react'
+import api from '../../services/api'
 
 function getCookie(name) {
   const value = `; ${document.cookie}`
@@ -11,7 +12,7 @@ function getCookie(name) {
   return ''
 }
 
-const CHECK_URL = '/procurement/purchase-orders/bulk-generate/check/'
+const CHECK_URL = '/purchase-orders/bulk-generate/check/'
 const CREATE_URL = '/procurement/api/quotations/create/'
 const MATERIAL_OPTIONS_URL = '/materials/master/options/'
 
@@ -48,9 +49,8 @@ export default function QuotationBuilder() {
   const [party, setParty] = useState(emptyParty())
 
   useEffect(() => {
-    fetch(MATERIAL_OPTIONS_URL, { credentials: 'same-origin' })
-      .then((res) => res.json())
-      .then((data) => setMaterialOptions(data.results || []))
+    api.get(MATERIAL_OPTIONS_URL)
+      .then((res) => setMaterialOptions(res.data.results || []))
       .catch(() => setMaterialOptions([]))
   }, [])
 
@@ -80,16 +80,12 @@ export default function QuotationBuilder() {
     setVerifying(true)
     setAlert(null)
     try {
-      const options = { method: 'POST', headers: { 'X-CSRFToken': getCookie('csrftoken') } }
-      if (isFormData) {
-        options.body = body
-      } else {
-        options.headers['Content-Type'] = 'application/json'
-        options.body = JSON.stringify(body)
-      }
-      const res = await fetch(CHECK_URL, options)
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || 'Could not verify the product list against inventory.')
+      // FormData needs Content-Type unset so axios/the browser can set
+      // multipart/form-data with the boundary itself, instead of the
+      // client's default 'application/json'.
+      const config = isFormData ? { headers: { 'Content-Type': undefined } } : undefined
+      const res = await api.post(CHECK_URL, body, config)
+      const data = res.data
       setPreview(data)
       if (isFormData) {
         // populate the editable table from the parsed file so it can be tweaked before saving
@@ -105,7 +101,7 @@ export default function QuotationBuilder() {
           : `Verified ${count} product${count === 1 ? '' : 's'} — some items don't match inventory yet. You can still save the quotation and fix it later.`,
       })
     } catch (err) {
-      setAlert({ type: 'error', message: err.message })
+      setAlert({ type: 'error', message: err.response?.data?.error || 'Could not verify the product list against inventory.' })
     } finally {
       setVerifying(false)
     }

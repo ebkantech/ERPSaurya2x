@@ -1,8 +1,73 @@
+import secrets
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Sum
+
+
+class VendorRegistrationPayment(models.Model):
+    """One onboarding-fee payment attempt collected through Razorpay during
+    vendor registration. A row is created when the checkout order is opened
+    (status=created), flipped to `paid` once the gateway signature is
+    verified, and finally `linked` once register_vendor consumes it and
+    attaches the freshly created vendor. Only a `paid`, unlinked row can be
+    consumed, so a single payment can never onboard two vendors."""
+
+    STATUS_CREATED = 'created'
+    STATUS_PAID = 'paid'
+    STATUS_LINKED = 'linked'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_CREATED, 'Created'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_LINKED, 'Linked'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    # Nullable: the vendor record does not exist yet when the fee is paid.
+    vendor = models.ForeignKey(
+        'core.Vendor',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='registration_payments',
+    )
+    receipt = models.CharField(max_length=40, unique=True)
+    company_name = models.CharField(max_length=200, blank=True)
+    contact_name = models.CharField(max_length=100, blank=True)
+    contact_email = models.EmailField(blank=True)
+
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    currency = models.CharField(max_length=8, default='INR')
+
+    razorpay_payment_link_id = models.CharField(max_length=64, blank=True, db_index=True)
+    payment_link_url = models.URLField(max_length=500, blank=True)
+    razorpay_payment_id = models.CharField(max_length=64, blank=True)
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_CREATED)
+    link_sent_at = models.DateTimeField(null=True, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'vendor_registration_payment'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f'{self.receipt} ({self.get_status_display()})'
+
+    @staticmethod
+    def generate_receipt():
+        # Razorpay caps the order `receipt` field at 40 chars.
+        return f'VRP-{secrets.token_hex(8)}'
+
+    @property
+    def amount_in_paise(self):
+        # Razorpay orders are denominated in the currency's smallest unit.
+        return int((self.amount * 100).to_integral_value())
 
 
 class VendorPayment(models.Model):
