@@ -1,8 +1,11 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, FolderKanban, MapPin, Zap, Users, Loader2, CheckCircle } from 'lucide-react'
+import api from '../../services/api'
 
 const SECTIONS = ['Basic Info', 'Location & Client', 'Scope & Team']
+const PROJECT_OPTIONS_URL = '/projects/options/'
+const PROJECT_CREATE_URL = '/projects/master/create/'
 
 const Field = ({ label, required, children, className = '' }) => (
   <div className={className}>
@@ -40,10 +43,15 @@ export default function ProjectCreate() {
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
 
+  const [businessUnits, setBusinessUnits] = useState([])
+  const [procurementSources, setProcurementSources] = useState([])
+
   const [form, setForm] = useState({
     name: '',
     code: '',
     type: '',
+    businessUnit: '',
+    procurementSource: '',
     status: 'Planning',
     capacity: '',
     capacityUnit: 'MW',
@@ -59,21 +67,66 @@ export default function ProjectCreate() {
     notes: '',
   })
 
+  useEffect(() => {
+    api.get(PROJECT_OPTIONS_URL)
+      .then(res => {
+        setBusinessUnits(res.data.business_units || [])
+        setProcurementSources(res.data.procurement_sources || [])
+      })
+      .catch(() => { /* dropdowns just stay empty; server still validates */ })
+  }, [])
+
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    if (!form.name || !form.type || !form.client) {
-      setError('Project name, type, and client are required.')
+
+    // Mirror the server's required fields so we fail fast with a clear message
+    // instead of a generic 400.
+    if (!form.name || !form.businessUnit || !form.procurementSource) {
+      setError('Project name, business unit, and procurement source are required.')
       setStep(0)
       return
     }
+    const capacityNum = parseFloat(form.capacity)
+    if (!capacityNum || capacityNum <= 0) {
+      setError('Capacity must be greater than zero.')
+      setStep(0)
+      return
+    }
+    // The backend stores capacity as MW; convert kW → MW, pass others as-is.
+    const totalMw = form.capacityUnit === 'KW' ? capacityNum / 1000 : capacityNum
+
     setError('')
     setSubmitting(true)
-    await new Promise(r => setTimeout(r, 1000))
-    setSubmitting(false)
-    setSuccess(true)
-    setTimeout(() => navigate('/projects'), 2000)
+
+    const payload = {
+      projectName: form.name,
+      clientName: form.client,
+      procurementSource: form.procurementSource,
+      businessUnit: form.businessUnit,
+      projectLocation: [form.district, form.state].filter(Boolean).join(', '),
+      totalMw: String(totalMw),
+      status: (form.status || 'planning').toLowerCase(),
+      note: form.notes,
+    }
+
+    try {
+      const res = await api.post(PROJECT_CREATE_URL, payload)
+      if (res.data.project) {
+        setSuccess(true)
+        setTimeout(() => navigate('/projects'), 1500)
+      } else {
+        const msg = Array.isArray(res.data.error) ? res.data.error.join(', ') : (res.data.error || 'Could not create project.')
+        setError(msg)
+      }
+    } catch (err) {
+      const data = err.response?.data
+      const msg = Array.isArray(data?.error) ? data.error.join(', ') : (data?.error || 'Could not create project. Please try again.')
+      setError(msg)
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const sectionIcons = [FolderKanban, MapPin, Users]
@@ -137,8 +190,8 @@ export default function ProjectCreate() {
               <Field label="Project Code">
                 <Input placeholder="e.g. PRJ-007" value={form.code} onChange={set('code')} />
               </Field>
-              <Field label="Project Type" required>
-                <Select value={form.type} onChange={set('type')} required>
+              <Field label="Project Type">
+                <Select value={form.type} onChange={set('type')}>
                   <option value="">Select type</option>
                   <option value="Solar PV">Solar PV</option>
                   <option value="Wind">Wind</option>
@@ -150,9 +203,22 @@ export default function ProjectCreate() {
                   <option value="Other">Other</option>
                 </Select>
               </Field>
+              <Field label="Business Unit" required>
+                <Select value={form.businessUnit} onChange={set('businessUnit')} required>
+                  <option value="">Select business unit</option>
+                  {businessUnits.map(bu => <option key={bu} value={bu}>{bu}</option>)}
+                </Select>
+              </Field>
+              <Field label="Procurement Source" required>
+                <Select value={form.procurementSource} onChange={set('procurementSource')} required>
+                  <option value="">Select source</option>
+                  {procurementSources.map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                </Select>
+              </Field>
               <Field label="Status">
                 <Select value={form.status} onChange={set('status')}>
                   <option value="Planning">Planning</option>
+                  <option value="Running">Running</option>
                   <option value="Active">Active</option>
                   <option value="On Hold">On Hold</option>
                   <option value="Completed">Completed</option>
