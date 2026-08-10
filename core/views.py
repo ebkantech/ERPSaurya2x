@@ -1222,15 +1222,15 @@ def sign_out(request):
     return redirect('/admin/login/')
 
 
-@login_required(login_url='/admin/login/')
 def db_diagnostics(request):
-    """TEMPORARY admin-only probe: reports which database the running app is
-    actually connected to and whether a write round-trips. Used to diagnose
-    the Vercel/Neon persistence issue. Remove once resolved."""
+    """TEMPORARY token-gated probe: reports which database the running app is
+    actually connected to and whether a write round-trips. Login is NOT
+    required on purpose — DB-backed sessions don't persist when the DB is
+    ephemeral, which would otherwise make this endpoint unreachable. Gated by
+    a URL token instead. Remove once the deployment DB config is confirmed."""
     from django.db import connection
-    from permissions.utils import is_admin_like
 
-    if not is_admin_like(request.user):
+    if request.GET.get('token') != 'omega-dbcheck-7f3a9c2e':
         return JsonResponse({'error': 'forbidden'}, status=403)
 
     d = connection.settings_dict
@@ -1242,6 +1242,7 @@ def db_diagnostics(request):
         'conn_max_age': d.get('CONN_MAX_AGE', ''),
         'settings_module': os.environ.get('DJANGO_SETTINGS_MODULE', ''),
         'database_url_present': bool(os.environ.get('DATABASE_URL')),
+        'session_engine': getattr(settings, 'SESSION_ENGINE', 'django.contrib.sessions.backends.db'),
     }
     try:
         info['project_count'] = ProjectMaster.objects.count()
