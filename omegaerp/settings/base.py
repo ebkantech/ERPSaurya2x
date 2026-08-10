@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import environ
@@ -79,12 +80,27 @@ TEMPLATES = [
 WSGI_APPLICATION = 'omegaerp.wsgi.application'
 ASGI_APPLICATION = 'omegaerp.asgi.application'
 
-DATABASES = {
-    'default': env.db(
-        'DATABASE_URL',
-        default=f"sqlite:///{(BASE_DIR / 'db.sqlite3').as_posix()}",
-    )
-}
+# Vercel's Neon integration exposes the Postgres connection string under one
+# of several names depending on how the project was linked. Accept the common
+# ones (in priority order) so production is never silently left on the
+# ephemeral SQLite fallback — which resets every serverless invocation — just
+# because only POSTGRES_URL was set instead of DATABASE_URL.
+_DB_URL = (
+    os.environ.get('DATABASE_URL')
+    or os.environ.get('POSTGRES_URL')
+    or os.environ.get('POSTGRES_PRISMA_URL')
+    or os.environ.get('DATABASE_URL_UNPOOLED')
+    or os.environ.get('POSTGRES_URL_NON_POOLING')
+)
+if _DB_URL:
+    DATABASES = {'default': env.db_url_config(_DB_URL)}
+else:
+    DATABASES = {
+        'default': env.db(
+            'DATABASE_URL',
+            default=f"sqlite:///{(BASE_DIR / 'db.sqlite3').as_posix()}",
+        )
+    }
 DATABASES['default']['CONN_MAX_AGE'] = env.int('DB_CONN_MAX_AGE', default=60)
 DATABASES['default']['CONN_HEALTH_CHECKS'] = env.bool('DB_CONN_HEALTH_CHECKS', default=True)
 

@@ -1243,6 +1243,14 @@ def db_diagnostics(request):
         'settings_module': os.environ.get('DJANGO_SETTINGS_MODULE', ''),
         'database_url_present': bool(os.environ.get('DATABASE_URL')),
         'session_engine': getattr(settings, 'SESSION_ENGINE', 'django.contrib.sessions.backends.db'),
+        # Which DB connection-string env vars production actually has (names
+        # only, never values) — tells us exactly which one to rely on.
+        'db_env_vars_present': {
+            k: bool(os.environ.get(k)) for k in [
+                'DATABASE_URL', 'POSTGRES_URL', 'POSTGRES_PRISMA_URL',
+                'DATABASE_URL_UNPOOLED', 'POSTGRES_URL_NON_POOLING',
+            ]
+        },
     }
     try:
         info['project_count'] = ProjectMaster.objects.count()
