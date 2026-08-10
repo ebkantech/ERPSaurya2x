@@ -808,6 +808,27 @@ def material_create_api(request):
 
 
 @login_required(login_url='/admin/login/')
+def project_list_api(request):
+    """GET → all projects as JSON for the React project list."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    projects = ProjectMaster.objects.order_by('-created_at')
+    return JsonResponse({'projects': _serialize_project_rows(projects)})
+
+
+@login_required(login_url='/admin/login/')
+def project_options_api(request):
+    """GET → dropdown options for the project create form. Business units are
+    validated server-side in create_project_master, so the form must offer the
+    real ones."""
+    return JsonResponse({
+        'business_units': _get_business_unit_names(),
+        'procurement_sources': ['government', 'private', 'tender', 'epc', 'direct'],
+        'statuses': ['planning', 'running', 'active', 'on hold', 'completed'],
+    })
+
+
+@login_required(login_url='/admin/login/')
 def create_project_master(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'POST required'}, status=405)
