@@ -1,6 +1,5 @@
 import os
 import json
-from django.shortcuts import render
 from django.conf import settings
 from .models import Document, ExistingDocument
 from django.db.models import Q
@@ -145,65 +144,6 @@ def hybrid_search(query: str, topk: int = 10) -> Dict:
             seen.add(t)
 
     return {'intent': intent, 'results': combined}
-
-
-def index(request):
-    return render(request, 'search/index.html')
-
-
-def search_view(request):
-    query = request.GET.get('q') or ''
-    results = []
-    if query:
-        # Try Postgres pgvector search first
-        try:
-            from sentence_transformers import SentenceTransformer
-            import numpy as np
-            from django.db import connection
-
-            model = SentenceTransformer('all-MiniLM-L6-v2')
-            qvec = model.encode([query], convert_to_numpy=True)[0]
-            # convert to pgvector literal string
-            qstr = '[' + ','.join(map(str, qvec.tolist())) + ']'
-
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id FROM material_master 
-                    WHERE embedding IS NOT NULL
-                    ORDER BY embedding <-> %s
-                    LIMIT 20
-                    """,
-                    [qstr],
-                )
-                rows = cursor.fetchall()
-                ids = [r[0] for r in rows]
-                if ids:
-                    preserved = ids
-                    results = list(Document.objects.filter(id__in=preserved))
-        except Exception:
-            # fallback to FAISS index if PG search not available
-            try:
-                from sentence_transformers import SentenceTransformer
-                import faiss
-                import numpy as np
-
-                model = SentenceTransformer('all-MiniLM-L6-v2')
-                qvec = model.encode([query], convert_to_numpy=True).astype('float32')
-
-                if os.path.exists(INDEX_FILE) and os.path.exists(MAPPING_FILE):
-                    index = faiss.read_index(INDEX_FILE)
-                    D, I = index.search(qvec, 10)
-                    with open(MAPPING_FILE, 'r', encoding='utf-8') as f:
-                        mapping = json.load(f)
-                    ids = [mapping.get(str(int(i))) for i in I[0] if str(int(i)) in mapping]
-                    # preserve order
-                    preserved = [int(x) for x in ids if x]
-                    results = list(Document.objects.filter(id__in=preserved))
-            except Exception:
-                results = []
-
-    return render(request, 'search/results.html', {'query': query, 'results': results})
 
 
 def api_search(request):

@@ -39,6 +39,25 @@ def is_view_only(user):
     return get_user_role(user) in READ_ONLY_ROLES
 
 
+def can_create_vendors(user):
+    """Whether ``user`` may create vendor records.
+
+    Single source of truth for the vendor-create gate shared by the two
+    creation paths (``core.views.register_vendor`` and
+    ``vendors.views.vendor_master``): admin-like users always may; other roles
+    need ``can_create`` on the ``vendors`` module. Anonymous users get ``False``
+    because ``get_user_role`` returns ``None`` for them.
+    """
+    if is_admin_like(user):
+        return True
+    role = get_user_role(user)
+    if not role:
+        return False
+    from .models import RolePermission
+    perm = RolePermission.objects.filter(role=role, module_key='vendors').first()
+    return bool(perm and perm.can_create)
+
+
 def require_authenticated(request):
     if request.user.is_authenticated:
         return None

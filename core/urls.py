@@ -8,7 +8,6 @@ from . import views
 # the stable path new frontend code should call. The paths below are kept
 # working as thin aliases (same view function, unchanged) during migration.
 urlpatterns = [
-    path('', views.index, name='index'),
     path('signout/', views.sign_out, name='sign-out'),
     path('projects/', views.project_module, name='project-module'),
     path('projects/master/', views.project_master, name='project-master'),

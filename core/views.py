@@ -2,7 +2,6 @@ import datetime
 import json
 import traceback
 import zipfile
-from collections import defaultdict
 from decimal import Decimal
 from xml.etree import ElementTree as ET
 
@@ -39,21 +38,6 @@ ACCOUNT_TYPE_OPTIONS = ['savings', 'current', 'cash credit', 'other']
 BANK_PROOF_TYPE_OPTIONS = ['passbook', 'cancelled-cheque']
 QUALIFICATION_STATUS_OPTIONS = ['qualified', 'disqualified']
 GST_PENDING_STATUS_OPTIONS = ['more than year', 'less than second year']
-
-PROJECT_STATUS_RUNNING = 'running'
-PROJECT_STATUS_COMPLETED = 'completed'
-PROJECT_STATUS_ALIGNED = 'aligned'
-PROJECT_STATUS_ORDER = [
-    PROJECT_STATUS_RUNNING,
-    PROJECT_STATUS_COMPLETED,
-    PROJECT_STATUS_ALIGNED,
-]
-PROJECT_STATUS_LABELS = {
-    PROJECT_STATUS_RUNNING: 'Running',
-    PROJECT_STATUS_COMPLETED: 'Completed',
-    PROJECT_STATUS_ALIGNED: 'Aligned',
-}
-
 
 def _material_import_header_map():
     aliases = {
@@ -252,143 +236,6 @@ def _serialize_vendor_detail_rows(queryset):
     return [_serialize_vendor_detail(vendor) for vendor in queryset]
 
 
-def _normalize_project_status(raw_status):
-    normalized = (raw_status or '').strip().lower().replace('_', ' ').replace('-', ' ')
-    if normalized in {'running', 'active', 'in progress', 'ongoing', 'execution'}:
-        return PROJECT_STATUS_RUNNING
-    if normalized in {'completed', 'complete', 'closed', 'finished', 'commissioned'}:
-        return PROJECT_STATUS_COMPLETED
-    if normalized in {'aligned', 'assigned', 'planned', 'awarded', 'pipeline', 'new'}:
-        return PROJECT_STATUS_ALIGNED
-    return PROJECT_STATUS_ALIGNED
-
-
-def _parse_project_geography(location_text):
-    parts = [part.strip() for part in str(location_text or '').split(',') if part.strip()]
-    district = parts[-3] if len(parts) >= 3 else (parts[0] if len(parts) == 1 else 'Unspecified District')
-    state = parts[-2] if len(parts) >= 2 else 'Unspecified State'
-    country = parts[-1] if len(parts) >= 1 else 'Unspecified Country'
-    return {
-        'district': district or 'Unspecified District',
-        'state': state or 'Unspecified State',
-        'country': country or 'Unspecified Country',
-    }
-
-
-def _empty_status_totals():
-    return {status: Decimal('0') for status in PROJECT_STATUS_ORDER}
-
-
-def _build_dashboard_chart_payload(geo_totals):
-    labels = []
-    running_values = []
-    completed_values = []
-    aligned_values = []
-    total_values = []
-    vendor_counts = []
-
-    for name, totals in geo_totals.items():
-        labels.append(name)
-        running_values.append(float(totals[PROJECT_STATUS_RUNNING]))
-        completed_values.append(float(totals[PROJECT_STATUS_COMPLETED]))
-        aligned_values.append(float(totals[PROJECT_STATUS_ALIGNED]))
-        total_values.append(
-            float(
-                totals[PROJECT_STATUS_RUNNING]
-                + totals[PROJECT_STATUS_COMPLETED]
-                + totals[PROJECT_STATUS_ALIGNED]
-            )
-        )
-        vendor_counts.append(len(totals.get('vendor_ids', set())))
-
-    return {
-        'labels': labels,
-        'running': running_values,
-        'completed': completed_values,
-        'aligned': aligned_values,
-        'total': total_values,
-        'vendor_counts': vendor_counts,
-    }
-
-
-def _build_project_dashboard_metrics(projects):
-    status_totals = _empty_status_totals()
-    country_totals = defaultdict(lambda: {**_empty_status_totals(), 'vendor_ids': set()})
-    state_totals = defaultdict(lambda: {**_empty_status_totals(), 'vendor_ids': set()})
-    district_totals = defaultdict(lambda: {**_empty_status_totals(), 'vendor_ids': set()})
-
-    for project in projects:
-        project_mw = project.total_mw or Decimal('0')
-        status_key = _normalize_project_status(project.status)
-        geography = _parse_project_geography(project.project_location)
-        vendor_ids = {
-            allocation.vendor_id
-            for allocation in project.allocations.all()
-            if allocation.vendor_id
-        }
-
-        status_totals[status_key] += project_mw
-        country_totals[geography['country']][status_key] += project_mw
-        state_totals[geography['state']][status_key] += project_mw
-        district_totals[geography['district']][status_key] += project_mw
-        country_totals[geography['country']]['vendor_ids'].update(vendor_ids)
-        state_totals[geography['state']]['vendor_ids'].update(vendor_ids)
-        district_totals[geography['district']]['vendor_ids'].update(vendor_ids)
-
-    def sorted_geo(source):
-        return dict(
-            sorted(
-                source.items(),
-                key=lambda item: (
-                    item[1][PROJECT_STATUS_RUNNING]
-                    + item[1][PROJECT_STATUS_COMPLETED]
-                    + item[1][PROJECT_STATUS_ALIGNED]
-                ),
-                reverse=True,
-            )
-        )
-
-    return {
-        'status_totals': status_totals,
-        'country_chart': _build_dashboard_chart_payload(sorted_geo(country_totals)),
-        'state_chart': _build_dashboard_chart_payload(sorted_geo(state_totals)),
-        'district_chart': _build_dashboard_chart_payload(sorted_geo(district_totals)),
-    }
-
-
-def _serialize_project_progress_rows(projects):
-    rows = []
-    for project in projects:
-        geography = _parse_project_geography(project.project_location)
-        for allocation in project.allocations.select_related('vendor', 'work_package').all():
-            allocated_mw = allocation.allocated_mw or Decimal('0')
-            completed_mw = allocation.completed_mw or Decimal('0')
-            progress_percent = Decimal('0')
-            if allocated_mw > 0:
-                progress_percent = (completed_mw / allocated_mw) * Decimal('100')
-            rows.append({
-                'project_id': project.id,
-                'project_code': project.project_code or '',
-                'project_name': project.project_name or '',
-                'district': geography['district'],
-                'state': geography['state'],
-                'country': geography['country'],
-                'vendor_id': allocation.vendor.vendor_id if allocation.vendor else '',
-                'vendor_name': allocation.vendor.company_name if allocation.vendor else '',
-                'work_package': allocation.work_package.name if allocation.work_package else '',
-                'allocated_mw': float(allocated_mw),
-                'completed_mw': float(completed_mw),
-                'pending_mw': float(max(allocated_mw - completed_mw, Decimal('0'))),
-                'progress_percent': float(progress_percent.quantize(Decimal('0.01'))),
-                'timeline_start_date': allocation.timeline_start_date.isoformat() if allocation.timeline_start_date else '',
-                'timeline_end_date': allocation.timeline_end_date.isoformat() if allocation.timeline_end_date else '',
-                'actual_completion_date': allocation.actual_completion_date.isoformat() if allocation.actual_completion_date else '',
-                'status': allocation.status or '',
-                'scope_note': allocation.scope_note or '',
-            })
-    return rows
-
-
 def _clean_vendor_clients(value):
     if isinstance(value, list):
         raw_items = value
@@ -560,71 +407,6 @@ def _validate_vendor_payload(payload, files, require_file):
         'client_list_data': json.dumps(cleaned_clients),
     }
     return cleaned_data, errors
-
-
-@login_required(login_url='/admin/login/')
-def index(request):
-    from permissions.utils import get_user_role, is_admin_like
-    from permissions.constants import ROLE_VENDOR_MANAGER, ROLE_PURCHASE_MANAGER, ROLE_PURCHASE_STAFF
-
-    role = get_user_role(request.user)
-    admin = is_admin_like(request.user)
-    vendor_focused = role in {ROLE_VENDOR_MANAGER, ROLE_PURCHASE_MANAGER, ROLE_PURCHASE_STAFF}
-
-    show_project_panel = not vendor_focused or admin
-    show_vendor_panel = vendor_focused or admin
-
-    context = {
-        'page_title': 'Dashboard',
-        'show_project_panel': show_project_panel,
-        'show_vendor_panel': show_vendor_panel,
-    }
-
-    if show_project_panel:
-        projects = list(ProjectMaster.objects.prefetch_related('allocations').order_by('-created_at'))
-        dashboard_metrics = _build_project_dashboard_metrics(projects)
-        progress_rows = _serialize_project_progress_rows(projects)
-        total_mw = sum((project.total_mw or Decimal('0') for project in projects), Decimal('0'))
-        district_options = sorted({row['district'] for row in progress_rows if row['district']})
-        context.update({
-            'project_count': len(projects),
-            'total_mw': total_mw,
-            'running_mw': dashboard_metrics['status_totals'][PROJECT_STATUS_RUNNING],
-            'completed_mw': dashboard_metrics['status_totals'][PROJECT_STATUS_COMPLETED],
-            'aligned_mw': dashboard_metrics['status_totals'][PROJECT_STATUS_ALIGNED],
-            'status_summary_chart_data': json.dumps(
-                [
-                    float(dashboard_metrics['status_totals'][PROJECT_STATUS_RUNNING]),
-                    float(dashboard_metrics['status_totals'][PROJECT_STATUS_COMPLETED]),
-                    float(dashboard_metrics['status_totals'][PROJECT_STATUS_ALIGNED]),
-                ]
-            ),
-            'country_chart_data': json.dumps(dashboard_metrics['country_chart']),
-            'state_chart_data': json.dumps(dashboard_metrics['state_chart']),
-            'district_chart_data': json.dumps(dashboard_metrics['district_chart']),
-            'progress_project_options': json.dumps([
-                {
-                    'id': project.id,
-                    'project_code': project.project_code or '',
-                    'project_name': project.project_name or '',
-                }
-                for project in projects
-            ]),
-            'progress_district_options': json.dumps(district_options),
-            'project_progress_rows': json.dumps(progress_rows),
-        })
-
-    if show_vendor_panel:
-        vendor_count = Vendor.objects.count()
-        recent_vendors = list(
-            Vendor.objects.order_by('-created_at')[:5].values('vendor_id', 'company_name', 'vendor_category')
-        )
-        context.update({
-            'vendor_count': vendor_count,
-            'recent_vendors': recent_vendors,
-        })
-
-    return render(request, 'dashboard.html', context)
 
 
 @login_required(login_url='/admin/login/')

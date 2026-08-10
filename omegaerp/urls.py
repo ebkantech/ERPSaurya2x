@@ -88,11 +88,18 @@ urlpatterns = [
     # tightened catch-all below safely 404 anything else under these
     # prefixes instead of silently serving the SPA for a broken/renamed
     # Django route. Keep this in sync with App.jsx.
+    # DEAD until the matching core.urls entry below is removed (Step 2 of the
+    # migration): include('core.urls') above already claims these exact
+    # prefixes ('vendors/', 'projects/', 'materials/') and matches first, so
+    # these three lines can never fire today. Left in place so the route
+    # exists the moment core.urls stops claiming it — do not delete yet.
     re_path(r'^vendors/?$', _react_index),
     re_path(r'^vendors/[^/]+/?$', _react_index),                        # vendors/new, vendors/<id>
+    # DEAD — see comment above; core.urls still claims 'projects/'.
     re_path(r'^projects/?$', _react_index),
     re_path(r'^projects/new/?$', _react_index),
     re_path(r'^projects/solar-tracker/?$', _react_index),
+    # DEAD — see comment above; core.urls still claims 'materials/'.
     re_path(r'^materials/?$', _react_index),
     re_path(r'^materials/quotations/?$', _react_index),
     re_path(r'^materials/quotations/new/?$', _react_index),

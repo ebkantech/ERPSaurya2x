@@ -12,14 +12,14 @@
     <div class="app-layout">
         <aside class="sidebar-panel">
             <div>
-                <a class="brand-logo-link" href="{% url 'index' %}" aria-label="OmegaERP home">
+                <a class="brand-logo-link" href="/" aria-label="OmegaERP home">
                     <img class="brand-logo-image" src="{% static 'legacy/branding/omega-logo.png' %}" alt="OmegaERP logo">
                 </a>
                 <div class="brand-subtitle mt-2">Operations workspace</div>
             </div>
             <nav class="nav flex-column mt-4 gap-2">
                 {% if request.user.is_authenticated %}
-                <a class="nav-link app-nav-link {% if request.path == '/' %}active{% endif %}" href="{% url 'index' %}">Dashboard</a>
+                <a class="nav-link app-nav-link {% if request.path == '/' %}active{% endif %}" href="/">Dashboard</a>
                 {% if is_admin or user_perms.purchase_orders.can_view %}
                 <a class="nav-link app-nav-link {% if '/procurement/' in request.path %}active{% endif %}" href="{% url 'procurement-dashboard' %}">PO Tracking</a>
                 {% endif %}

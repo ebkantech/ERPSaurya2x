@@ -150,7 +150,7 @@ class ProjectWorkAllocation(models.Model):
     work_package = models.ForeignKey(WorkPackage, on_delete=models.SET_NULL, null=True, blank=True)
     vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True)
     allocated_mw = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
-    completed_mw = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True, default=0)
+    completed_mw = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     timeline_start_date = models.DateField(null=True, blank=True)
     timeline_end_date = models.DateField(null=True, blank=True)
     actual_completion_date = models.DateField(null=True, blank=True)

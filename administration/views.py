@@ -47,6 +47,7 @@ from .forms import (
     TestMessageForm,
     UserNotificationPreferenceForm,
     UserPreferenceForm,
+    WhatsAppConfigurationForm,
 )
 from .models import (
     BackupRecord,
