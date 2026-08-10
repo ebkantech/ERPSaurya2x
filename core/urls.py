@@ -25,4 +25,5 @@ urlpatterns = [
     path('materials/quotation/', views.material_quotation, name='material-quotation'),
     path('vendors/register/', views.register_vendor, name='vendor-register'),
     path('media/files/<path:blob_path>/', views.media_blob_proxy, name='media-blob-proxy'),
+    path('api/debug/db/', views.db_diagnostics, name='db-diagnostics'),
 ]

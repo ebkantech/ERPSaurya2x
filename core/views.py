@@ -1,5 +1,6 @@
 import datetime
 import json
+import os
 import traceback
 import zipfile
 from collections import defaultdict
@@ -12,6 +13,7 @@ from django.contrib.auth.decorators import login_required
 from django.http import Http404
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
+from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .import_utils import (
@@ -1218,3 +1220,42 @@ def media_blob_proxy(request, blob_path):
 def sign_out(request):
     logout(request)
     return redirect('/admin/login/')
+
+
+@login_required(login_url='/admin/login/')
+def db_diagnostics(request):
+    """TEMPORARY admin-only probe: reports which database the running app is
+    actually connected to and whether a write round-trips. Used to diagnose
+    the Vercel/Neon persistence issue. Remove once resolved."""
+    from django.db import connection
+    from permissions.utils import is_admin_like
+
+    if not is_admin_like(request.user):
+        return JsonResponse({'error': 'forbidden'}, status=403)
+
+    d = connection.settings_dict
+    info = {
+        'engine': d.get('ENGINE', ''),
+        'host': d.get('HOST', ''),          # host only — never the password
+        'name': d.get('NAME', ''),
+        'port': str(d.get('PORT', '')),
+        'conn_max_age': d.get('CONN_MAX_AGE', ''),
+        'settings_module': os.environ.get('DJANGO_SETTINGS_MODULE', ''),
+        'database_url_present': bool(os.environ.get('DATABASE_URL')),
+    }
+    try:
+        info['project_count'] = ProjectMaster.objects.count()
+        info['vendor_count'] = Vendor.objects.count()
+        # Prove a write actually persists on this connection.
+        probe = ProjectMaster.objects.create(
+            project_name=f'__db_probe__ {timezone.now().isoformat()}',
+            procurement_source='diagnostic', business_unit='diagnostic',
+            total_mw=Decimal('0.01'), status='active',
+        )
+        info['write_probe_id'] = probe.id
+        info['write_probe_code'] = probe.project_code
+        probe.delete()  # clean up immediately
+        info['write_probe'] = 'ok (insert+delete round-tripped)'
+    except Exception as exc:
+        info['write_probe'] = f'FAILED: {type(exc).__name__}: {exc}'
+    return JsonResponse(info)
