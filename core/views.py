@@ -1,5 +1,6 @@
 import datetime
 import json
+import os
 import traceback
 import zipfile
 from decimal import Decimal
@@ -8,9 +9,11 @@ from xml.etree import ElementTree as ET
 from django.conf import settings
 from django.contrib.auth import logout
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.http import Http404
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
+from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .import_utils import (
@@ -1010,50 +1013,97 @@ def register_vendor(request):
         from payments.services import create_registration_payment_link
 
         reference = (request.POST.get('payment_reference') or '').strip()
-        payment = None
-        if reference:
-            payment = VendorRegistrationPayment.objects.filter(
-                receipt=reference,
-                vendor__isnull=True,
-            ).first()
 
-        vendor = Vendor(**cleaned_data)
-        vendor.save()
+        # Everything that writes the vendor runs in one transaction: Vendor.save
+        # inserts the row then does a second save to assign VPF###, so a failure
+        # between the two (or in the file upload / payment link) must roll the
+        # whole thing back — otherwise an orphan row with a blank vendor_id is
+        # left behind (observed in production data).
+        with transaction.atomic():
+            payment = None
+            if reference:
+                payment = VendorRegistrationPayment.objects.filter(
+                    receipt=reference,
+                    vendor__isnull=True,
+                ).first()
 
-        if 'bankProofFile' in request.FILES:
-            vendor.passbook_file = request.FILES['bankProofFile']
+            vendor = Vendor(**cleaned_data)
             vendor.save()
 
-        # No link came from the payment step but the gateway is on → mint one
-        # now so every pending vendor carries a payment link on the list.
-        if payment is None and payment_gateway_enabled():
-            try:
-                payment = create_registration_payment_link(
-                    company_name=vendor.company_name,
-                    contact_name=vendor.contact_person,
-                    contact_email=vendor.email_id,
-                    contact_phone=vendor.mobile_number,
-                    vendor=vendor,
-                )
-            except GatewayError:
-                traceback.print_exc()
-                payment = None  # never fail registration on a gateway hiccup
+            if 'bankProofFile' in request.FILES:
+                vendor.passbook_file = request.FILES['bankProofFile']
+                vendor.save()
 
-        if payment is not None:
-            payment.vendor = vendor
-            if payment.status == VendorRegistrationPayment.STATUS_PAID:
-                # Paid before the vendor existed → fully reconciled + active.
-                payment.status = VendorRegistrationPayment.STATUS_LINKED
-            else:
-                # Awaiting payment → not finally registered yet.
-                vendor.status = 'pending_payment'
-                vendor.save(update_fields=['status'])
-            payment.save(update_fields=['vendor', 'status', 'updated_at'])
+            # No link came from the payment step but the gateway is on → mint
+            # one now so every pending vendor carries a payment link on the list.
+            if payment is None and payment_gateway_enabled():
+                try:
+                    payment = create_registration_payment_link(
+                        company_name=vendor.company_name,
+                        contact_name=vendor.contact_person,
+                        contact_email=vendor.email_id,
+                        contact_phone=vendor.mobile_number,
+                        vendor=vendor,
+                    )
+                except GatewayError:
+                    traceback.print_exc()
+                    payment = None  # never fail registration on a gateway hiccup
+
+            if payment is not None:
+                payment.vendor = vendor
+                if payment.status == VendorRegistrationPayment.STATUS_PAID:
+                    # Paid before the vendor existed → fully reconciled + active.
+                    payment.status = VendorRegistrationPayment.STATUS_LINKED
+                else:
+                    # Awaiting payment → not finally registered yet.
+                    vendor.status = 'pending_payment'
+                    vendor.save(update_fields=['status'])
+                payment.save(update_fields=['vendor', 'status', 'updated_at'])
 
         return JsonResponse({'vendor_id': vendor.vendor_id})
     except Exception as e:
         traceback.print_exc()
         return JsonResponse({'error': 'server error'}, status=500)
+
+
+@login_required(login_url='/admin/login/')
+def db_diagnostics(request):
+    """TEMPORARY admin-only probe: reports which database the running app is
+    actually connected to and whether a write round-trips. Used to diagnose
+    the Vercel/Neon persistence issue. Remove once resolved."""
+    from django.db import connection
+    from permissions.utils import is_admin_like
+
+    if not is_admin_like(request.user):
+        return JsonResponse({'error': 'forbidden'}, status=403)
+
+    d = connection.settings_dict
+    info = {
+        'engine': d.get('ENGINE', ''),
+        'host': d.get('HOST', ''),          # host only — never the password
+        'name': d.get('NAME', ''),
+        'port': str(d.get('PORT', '')),
+        'conn_max_age': d.get('CONN_MAX_AGE', ''),
+        'autocommit': connection.get_autocommit() if connection.connection else None,
+        'settings_module': os.environ.get('DJANGO_SETTINGS_MODULE', ''),
+        'database_url_present': bool(os.environ.get('DATABASE_URL')),
+    }
+    try:
+        info['project_count'] = ProjectMaster.objects.count()
+        info['vendor_count'] = Vendor.objects.count()
+        # Prove a write actually persists on this connection.
+        probe = ProjectMaster.objects.create(
+            project_name=f'__db_probe__ {timezone.now().isoformat()}',
+            procurement_source='diagnostic', business_unit='diagnostic',
+            total_mw=Decimal('0.01'), status='active',
+        )
+        info['write_probe_id'] = probe.id
+        info['write_probe_code'] = probe.project_code
+        probe.delete()  # clean up immediately
+        info['write_probe'] = 'ok (insert+delete round-tripped)'
+    except Exception as exc:
+        info['write_probe'] = f'FAILED: {type(exc).__name__}: {exc}'
+    return JsonResponse(info)
 
 
 @login_required(login_url='/admin/login/')

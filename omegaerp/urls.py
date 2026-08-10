@@ -18,6 +18,7 @@ from core.views import (
     register_vendor,
     update_vendor,
     vendor_list_api,
+    db_diagnostics,
 )
 from purchase_orders.views import purchase_order_bulk_check
 import os
@@ -62,6 +63,7 @@ urlpatterns = [
     path('api/materials/master/work-package/', update_material_work_package, name='api-material-master-work-package'),
     path('api/projects/master/create/', create_project_master, name='api-project-master-create'),
     path('api/projects/distribution/save/', save_project_distribution, name='api-project-distribution-save'),
+    path('api/debug/db/', db_diagnostics, name='api-debug-db'),
     path('api/vendors/', vendor_list_api, name='api-vendor-list'),
     path('api/vendors/register/', register_vendor, name='api-vendor-register'),
     path('api/vendors/<str:vendor_id>/update/', update_vendor, name='api-vendor-update'),
