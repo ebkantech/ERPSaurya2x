@@ -1,14 +1,13 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Plus, Trash2, ShoppingCart, Building2, Package, CreditCard, Loader2, CheckCircle } from 'lucide-react'
+import api from '../../services/api'
+
+const VENDOR_OPTIONS_URL = '/purchase-orders/vendor-options/'
+const PO_CREATE_URL = '/purchase-orders/create/'
+const poItemsUrl = (id) => `/purchase-orders/${id}/items/`
 
 const SECTIONS = ['Vendor & Project', 'Line Items', 'Payment & Terms', 'Review']
-
-const vendors = [
-  'Tata Projects Ltd', 'Larsen & Toubro Ltd', 'Siemens India Ltd',
-  'ABB India Ltd', 'Havells Infra Pvt Ltd', 'BHEL Heavy Equipment',
-  'Sterling & Wilson', 'Greentech Solar Pvt',
-]
 
 const Field = ({ label, required, children, className = '' }) => (
   <div className={className}>
@@ -46,6 +45,9 @@ const emptyItem = () => ({ description: '', unit: 'Nos', qty: '', rate: '', gst:
 
 const fmt = (n) => isNaN(n) || n === 0 ? '—' : `₹${Number(n).toLocaleString('en-IN')}`
 
+const todayISO = () => new Date().toISOString().slice(0, 10)
+const suggestPoNumber = () => `PO-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`
+
 export default function POCreate() {
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
@@ -53,14 +55,33 @@ export default function POCreate() {
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
 
+  const [vendorOptions, setVendorOptions] = useState([])
+  const [vendorsLoading, setVendorsLoading] = useState(true)
+
+  useEffect(() => {
+    let active = true
+    api.get(VENDOR_OPTIONS_URL)
+      .then(res => { if (active) setVendorOptions(res.data.results || []) })
+      .catch(() => { if (active) setError('Could not load vendor list.') })
+      .finally(() => { if (active) setVendorsLoading(false) })
+    return () => { active = false }
+  }, [])
+
   const [form, setForm] = useState({
+    poNumber: suggestPoNumber(),
+    poDate: todayISO(),
     vendor: '',
+    businessDivision: 'solar',
     project: '',
-    workPackage: '',
+    projectLocation: '',
+    deliveryAddress: '',
+    dispatchOrigin: '',
+    department: '',
+    status: 'draft',
     deliveryDate: '',
     paymentTerms: '30 days net',
+    deliveryTerms: '',
     notes: '',
-    advancePercent: '30',
   })
 
   const [items, setItems] = useState([emptyItem()])
@@ -89,8 +110,8 @@ export default function POCreate() {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    if (!form.vendor || !form.project || !form.deliveryDate) {
-      setError('Please fill all required fields.')
+    if (!form.poNumber || !form.poDate || !form.vendor || !form.project) {
+      setError('Please fill all required fields (PO number, date, vendor, project).')
       setStep(0)
       return
     }
@@ -101,11 +122,57 @@ export default function POCreate() {
     }
     setError('')
     setSubmitting(true)
-    // Simulate API call (replace with real endpoint when backend PO API is ready)
-    await new Promise(r => setTimeout(r, 1200))
-    setSubmitting(false)
-    setSuccess(true)
-    setTimeout(() => navigate('/purchase-orders'), 2000)
+
+    try {
+      const fd = new FormData()
+      fd.append('po_number', form.poNumber)
+      fd.append('po_date', form.poDate)
+      fd.append('vendor', form.vendor)
+      fd.append('business_division', form.businessDivision)
+      fd.append('project_site_name', form.project)
+      fd.append('status', form.status)
+      if (form.projectLocation) fd.append('project_location', form.projectLocation)
+      if (form.deliveryAddress) fd.append('delivery_address', form.deliveryAddress)
+      if (form.dispatchOrigin) fd.append('dispatch_origin', form.dispatchOrigin)
+      if (form.department) fd.append('department', form.department)
+      if (form.paymentTerms) fd.append('payment_terms', form.paymentTerms)
+      if (form.deliveryTerms) fd.append('delivery_terms', form.deliveryTerms)
+      if (form.deliveryDate) fd.append('expected_delivery_date', form.deliveryDate)
+
+      const res = await api.post(PO_CREATE_URL, fd, { headers: { 'Content-Type': undefined } })
+      const po = res.data.po
+      const poId = po.id
+
+      const failedItems = []
+      for (const it of items) {
+        try {
+          await api.post(poItemsUrl(poId), {
+            material_category: 'General',
+            material_name: it.description,
+            unit: it.unit,
+            ordered_quantity: parseFloat(it.qty),
+            unit_rate: parseFloat(it.rate),
+            gst_percentage: parseFloat(it.gst || 0),
+          })
+        } catch (itemErr) {
+          failedItems.push(it.description)
+        }
+      }
+
+      setSubmitting(false)
+      if (failedItems.length > 0) {
+        setError(`PO ${po.po_number} was created, but these items failed to save: ${failedItems.join(', ')}. You can add them from the PO detail page.`)
+        setTimeout(() => navigate(`/purchase-orders/${poId}`), 2500)
+      } else {
+        setSuccess(true)
+        setTimeout(() => navigate(`/purchase-orders/${poId}`), 1500)
+      }
+    } catch (err) {
+      setSubmitting(false)
+      const data = err.response?.data
+      const fieldMsg = data?.field_errors ? Object.values(data.field_errors)[0]?.[0] : ''
+      setError(data?.error || fieldMsg || 'Could not create the purchase order. Please try again.')
+    }
   }
 
   const sectionIcons = [Building2, Package, CreditCard, ShoppingCart]
@@ -117,7 +184,7 @@ export default function POCreate() {
           <CheckCircle size={32} className="text-emerald-500" />
         </div>
         <h2 className="text-xl font-bold text-slate-900">Purchase Order Created</h2>
-        <p className="text-slate-500 text-sm">Redirecting to Purchase Orders…</p>
+        <p className="text-slate-500 text-sm">Redirecting to the purchase order…</p>
       </div>
     )
   }
@@ -161,20 +228,52 @@ export default function POCreate() {
           <div className="card p-6 space-y-4">
             <h3 className="font-semibold text-slate-900 text-sm border-b border-surface-100 pb-3">Vendor & Project Details</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Field label="PO Number" required>
+                <Input value={form.poNumber} onChange={setF('poNumber')} required />
+              </Field>
+              <Field label="PO Date" required>
+                <Input type="date" value={form.poDate} onChange={setF('poDate')} required />
+              </Field>
               <Field label="Vendor" required>
-                <Select value={form.vendor} onChange={setF('vendor')} required>
-                  <option value="">Select vendor</option>
-                  {vendors.map(v => <option key={v} value={v}>{v}</option>)}
+                <Select value={form.vendor} onChange={setF('vendor')} required disabled={vendorsLoading}>
+                  <option value="">{vendorsLoading ? 'Loading vendors…' : 'Select vendor'}</option>
+                  {vendorOptions.map(v => (
+                    <option key={v.id} value={v.id}>{v.company_name} ({v.vendor_id})</option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Business Division" required>
+                <Select value={form.businessDivision} onChange={setF('businessDivision')} required>
+                  <option value="solar">Solar</option>
+                  <option value="biogas">Biogas</option>
+                  <option value="infrastructure">Infrastructure</option>
+                  <option value="pharma">Pharma</option>
+                  <option value="other">Other</option>
                 </Select>
               </Field>
               <Field label="Project / Site" required>
                 <Input placeholder="e.g. Solar Farm Alpha" value={form.project} onChange={setF('project')} required />
               </Field>
-              <Field label="Work Package">
-                <Input placeholder="e.g. Electrical Civil Works" value={form.workPackage} onChange={setF('workPackage')} />
+              <Field label="Project Location">
+                <Input placeholder="e.g. Jodhpur, Rajasthan" value={form.projectLocation} onChange={setF('projectLocation')} />
               </Field>
-              <Field label="Expected Delivery Date" required>
-                <Input type="date" value={form.deliveryDate} onChange={setF('deliveryDate')} required />
+              <Field label="Delivery Address">
+                <Input placeholder="Site delivery address" value={form.deliveryAddress} onChange={setF('deliveryAddress')} />
+              </Field>
+              <Field label="From Where Material Is Coming">
+                <Input placeholder="Dispatch origin" value={form.dispatchOrigin} onChange={setF('dispatchOrigin')} />
+              </Field>
+              <Field label="Department">
+                <Input placeholder="e.g. Procurement" value={form.department} onChange={setF('department')} />
+              </Field>
+              <Field label="Status">
+                <Select value={form.status} onChange={setF('status')}>
+                  <option value="draft">Draft</option>
+                  <option value="approved">Approved</option>
+                </Select>
+              </Field>
+              <Field label="Expected Delivery Date">
+                <Input type="date" value={form.deliveryDate} onChange={setF('deliveryDate')} />
               </Field>
               <Field label="Notes / Scope" className="md:col-span-2">
                 <Textarea rows={3} placeholder="Any special instructions or scope notes…" value={form.notes} onChange={setF('notes')} />
@@ -286,31 +385,22 @@ export default function POCreate() {
                   <option value="Milestone-based">Milestone-based</option>
                 </Select>
               </Field>
-              <Field label="Advance Payment (%)">
-                <Select value={form.advancePercent} onChange={setF('advancePercent')}>
-                  <option value="0">No Advance</option>
-                  <option value="10">10%</option>
-                  <option value="20">20%</option>
-                  <option value="25">25%</option>
-                  <option value="30">30%</option>
-                  <option value="40">40%</option>
-                  <option value="50">50%</option>
-                </Select>
+              <Field label="Delivery Terms">
+                <Input placeholder="e.g. Ex-works, FOB, delivered at site" value={form.deliveryTerms} onChange={setF('deliveryTerms')} />
               </Field>
             </div>
             {grandTotal > 0 && (
               <div className="bg-surface-50 border border-surface-200 rounded-xl p-4">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Estimated Payment Schedule</p>
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Order Value</p>
                 <div className="space-y-2 text-sm">
-                  {[
-                    { label: `Advance (${form.advancePercent}%)`, pct: parseFloat(form.advancePercent) },
-                    { label: 'On Delivery (remaining)', pct: 100 - parseFloat(form.advancePercent) },
-                  ].map((s, i) => (
-                    <div key={i} className="flex justify-between">
-                      <span className="text-slate-600">{s.label}</span>
-                      <span className="font-semibold text-slate-900">{fmt(grandTotal * s.pct / 100)}</span>
-                    </div>
-                  ))}
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Sub-Total</span>
+                    <span className="font-semibold text-slate-900">{fmt(subTotal)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">GST</span>
+                    <span className="font-semibold text-slate-900">{fmt(totalGst)}</span>
+                  </div>
                   <div className="flex justify-between border-t border-surface-200 pt-2 font-bold">
                     <span>Total</span>
                     <span className="text-brand-600">{fmt(grandTotal)}</span>
@@ -332,12 +422,14 @@ export default function POCreate() {
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Vendor & Project</p>
               <div className="grid grid-cols-2 gap-3 text-sm">
                 {[
-                  { l: 'Vendor', v: form.vendor || '—' },
+                  { l: 'PO Number', v: form.poNumber || '—' },
+                  { l: 'PO Date', v: form.poDate || '—' },
+                  { l: 'Vendor', v: (vendorOptions.find(v => String(v.id) === String(form.vendor))?.company_name) || '—' },
                   { l: 'Project', v: form.project || '—' },
-                  { l: 'Work Package', v: form.workPackage || '—' },
+                  { l: 'Location', v: form.projectLocation || '—' },
                   { l: 'Delivery Date', v: form.deliveryDate || '—' },
                   { l: 'Payment Terms', v: form.paymentTerms },
-                  { l: 'Advance', v: `${form.advancePercent}%` },
+                  { l: 'Delivery Terms', v: form.deliveryTerms || '—' },
                 ].map(r => (
                   <div key={r.l} className="flex flex-col">
                     <span className="text-xs text-slate-400">{r.l}</span>

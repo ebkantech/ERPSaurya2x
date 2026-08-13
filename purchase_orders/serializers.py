@@ -7,6 +7,8 @@ def serialize_purchase_order(po: PurchaseOrder):
         'po_number': po.po_number,
         'po_date': po.po_date.isoformat() if po.po_date else '',
         'vendor': po.vendor.company_name if po.vendor_id else '',
+        'vendor_id': po.vendor_id,
+        'business_division': po.business_division,
         'vendor_tracking_id': po.vendor_tracking_id,
         'vendor_tracking_name': po.vendor_tracking_name,
         'project_site_name': po.project_site_name,

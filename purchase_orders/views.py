@@ -3,11 +3,9 @@ import zipfile
 from decimal import Decimal
 from xml.etree import ElementTree as ET
 
-from django.contrib import messages
-from django.db.models import Count, F, Q, Sum
+from django.db.models import Count, Q, Sum
 from django.http import JsonResponse
-from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from administration.models import SystemAuditLog
@@ -75,99 +73,10 @@ def _log_system_po_event(user, action, module, description, po, extra=None):
     )
 
 
-def _po_form_context(po=None, request=None):
-    po_form = PurchaseOrderForm(instance=po, prefix='po')
-    item_form = PurchaseOrderItemForm(prefix='item')
-    ref_form = PurchaseOrderReferenceCodeForm(prefix='ref')
-    delivery_form = DeliveryForm(prefix='delivery')
-    vehicle_form = VehicleMovementForm(prefix='vehicle')
-    invoice_form = DeliveryInvoiceChallanForm(prefix='invoice')
-    payment_form = VendorPaymentForm(prefix='payment')
-    document_form = BusinessDocumentForm(prefix='document')
-    activity_form = PurchaseOrderActivityLogForm(prefix='activity')
-    notification_form = NotificationLogForm(prefix='notify')
+def purchase_order_list_api(request):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
 
-    if po:
-        delivery_form.fields['po_item'].queryset = po.items.all()
-        invoice_form.fields['delivery'].queryset = po.deliveries.all()
-        if 'delivery' in vehicle_form.fields:
-            vehicle_form.fields['delivery'].queryset = po.deliveries.all()
-        payment_form.fields['related_delivery'].queryset = po.deliveries.all()
-        payment_form.fields['related_invoice'].queryset = po.invoice_challans.all()
-        document_form.fields['delivery'].queryset = po.deliveries.all()
-        document_form.fields['vehicle'].queryset = VehicleMovement.objects.filter(delivery__po=po)
-        document_form.fields['payment'].queryset = po.payments.all()
-        document_form.fields['reference_code'].queryset = po.reference_codes.all()
-        if 'delivery' in notification_form.fields:
-            notification_form.fields['delivery'].queryset = po.deliveries.all()
-        if 'payment' in notification_form.fields:
-            notification_form.fields['payment'].queryset = po.payments.all()
-
-    return {
-        'po_form': po_form,
-        'item_form': item_form,
-        'reference_form': ref_form,
-        'delivery_form': delivery_form,
-        'vehicle_form': vehicle_form,
-        'invoice_form': invoice_form,
-        'payment_form': payment_form,
-        'document_form': document_form,
-        'activity_form': activity_form,
-        'notification_form': notification_form,
-    }
-
-
-def procurement_dashboard(request):
-    po_queryset = PurchaseOrder.objects.select_related('vendor')
-    payment_queryset = VendorPayment.objects.select_related('po', 'vendor')
-    delivery_queryset = Delivery.objects.select_related('po', 'po_item')
-    vehicle_queryset = VehicleMovement.objects.select_related('delivery', 'delivery__po')
-
-    total_po_value = po_queryset.aggregate(total=Sum('total_po_value'))['total'] or Decimal('0.00')
-    paid_amount = payment_queryset.exclude(payment_status='rejected').aggregate(total=Sum('net_payable'))['total'] or Decimal('0.00')
-    pending_vendor_payments = payment_queryset.filter(payment_status__in=['pending', 'approved', 'hold']).count()
-    pending_deliveries = delivery_queryset.filter(delivery_status__in=['pending', 'in_transit', 'partially_received']).count()
-    in_transit_vehicles = vehicle_queryset.filter(vehicle_status__in=['dispatched', 'in_transit']).count()
-    delayed_deliveries = vehicle_queryset.filter(
-        expected_arrival_date__lt=timezone.localdate(),
-    ).exclude(vehicle_status__in=['reached_site', 'unloaded']).count()
-
-    delivered_quantity = po_queryset.aggregate(total=Sum('items__delivered_quantity'))['total'] or Decimal('0.00')
-    pending_quantity = po_queryset.aggregate(total=Sum('items__pending_quantity'))['total'] or Decimal('0.00')
-
-    vendor_outstanding = (
-        po_queryset.values('vendor_tracking_id', 'vendor_tracking_name')
-        .annotate(total_outstanding=Sum('outstanding_amount'))
-        .order_by('-total_outstanding')[:8]
-    )
-
-    po_status_rows = (
-        po_queryset.values('status')
-        .annotate(total=Count('id'))
-        .order_by('status')
-    )
-
-    context = {
-        'page_title': 'Purchase Order Tracking',
-        'procurement_nav': True,
-        'total_pos': po_queryset.count(),
-        'total_po_value': total_po_value,
-        'pending_deliveries': pending_deliveries,
-        'in_transit_vehicles': in_transit_vehicles,
-        'delivered_quantity': delivered_quantity,
-        'pending_quantity': pending_quantity,
-        'pending_vendor_payments': pending_vendor_payments,
-        'paid_amount': paid_amount,
-        'pending_amount': max(total_po_value - paid_amount, Decimal('0.00')),
-        'delayed_deliveries': delayed_deliveries,
-        'recent_pos': po_queryset.order_by('-created_at')[:6],
-        'vendor_outstanding': vendor_outstanding,
-        'po_status_rows': po_status_rows,
-    }
-    return render(request, 'procurement_dashboard.html', context)
-
-
-def purchase_order_master(request):
     po_queryset = PurchaseOrder.objects.select_related('vendor').order_by('-created_at')
     query = (request.GET.get('q') or '').strip()
     status_filter = (request.GET.get('status') or '').strip()
@@ -185,42 +94,48 @@ def purchase_order_master(request):
     if status_filter:
         po_queryset = po_queryset.filter(status=status_filter)
 
-    if request.method == 'POST':
-        form = PurchaseOrderForm(request.POST, request.FILES, prefix='po')
-        if form.is_valid():
-            po = form.save(commit=False)
-            if request.user.is_authenticated:
-                po.created_by = request.user
-            po.save()
-            _log_activity(po, 'po_created', 'Purchase order master created.', request.user, {'po_number': po.po_number})
-            _log_system_po_event(
-                request.user,
-                SystemAuditLog.ACTION_PO_CHANGE,
-                'purchase_orders',
-                f'Created purchase order {po.po_number}.',
-                po,
-            )
-            log_vendor_activity(
-                po.vendor,
-                VendorActivityLog.TYPE_PO_CREATED,
-                f'Purchase order {po.po_number} created for {po.project_site_name}.',
-                request.user,
-            )
-            po.refresh_progress()
-            return redirect('purchase-order-detail', pk=po.pk)
-    else:
-        form = PurchaseOrderForm(prefix='po')
+    po_queryset = po_queryset.annotate(item_count=Count('items', distinct=True))
+    rows = []
+    for po in po_queryset:
+        row = serialize_purchase_order(po)
+        row['item_count'] = po.item_count
+        row['expected_delivery_date'] = po.expected_delivery_date.isoformat() if po.expected_delivery_date else ''
+        rows.append(row)
 
-    context = {
-        'page_title': 'PO Master',
-        'procurement_nav': True,
-        'po_form': form,
-        'purchase_orders': po_queryset,
-        'query': query,
-        'status_filter': status_filter,
-        'po_status_choices': PurchaseOrder.STATUS_CHOICES,
-    }
-    return render(request, 'procurement_po_master.html', context)
+    return JsonResponse({
+        'results': rows,
+        'status_choices': PurchaseOrder.STATUS_CHOICES,
+    })
+
+
+def purchase_order_create_api(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+
+    form = PurchaseOrderForm(request.POST, request.FILES)
+    if not form.is_valid():
+        return _api_validation_error(form)
+
+    po = form.save(commit=False)
+    if request.user.is_authenticated:
+        po.created_by = request.user
+    po.save()
+    _log_activity(po, 'po_created', 'Purchase order master created.', request.user, {'po_number': po.po_number})
+    _log_system_po_event(
+        request.user,
+        SystemAuditLog.ACTION_PO_CHANGE,
+        'purchase_orders',
+        f'Created purchase order {po.po_number}.',
+        po,
+    )
+    log_vendor_activity(
+        po.vendor,
+        VendorActivityLog.TYPE_PO_CREATED,
+        f'Purchase order {po.po_number} created for {po.project_site_name}.',
+        request.user,
+    )
+    po.refresh_progress()
+    return JsonResponse({'message': f'Purchase order {po.po_number} created.', 'po': serialize_purchase_order(po)}, status=201)
 
 
 def _parse_bulk_check_xlsx(uploaded_file):
@@ -322,72 +237,6 @@ def purchase_order_bulk_check(request):
     return JsonResponse({'rows': result_rows, 'all_matched': all_matched})
 
 
-def purchase_order_bulk_generator(request):
-    form = PurchaseOrderForm(prefix='po')
-    bulk_rows = []
-    items_payload = '[]'
-    all_matched = False
-
-    if request.method == 'POST':
-        try:
-            raw_rows = json.loads(request.POST.get('items_payload') or '[]')
-        except json.JSONDecodeError:
-            raw_rows = []
-        items_payload = request.POST.get('items_payload') or '[]'
-
-        form = PurchaseOrderForm(request.POST, request.FILES, prefix='po')
-        bulk_rows, all_matched = check_bulk_rows(raw_rows) if raw_rows else ([], False)
-
-        if not raw_rows:
-            messages.error(request, 'Check a product list against inventory before generating a purchase order.')
-        elif not all_matched:
-            messages.error(
-                request,
-                'Some products in the list do not match inventory (missing or insufficient stock). '
-                'Fix the list before generating a purchase order.',
-            )
-        elif form.is_valid():
-            try:
-                po, bulk_rows = generate_purchase_order(form, raw_rows, request.user)
-            except BulkPOError as exc:
-                bulk_rows = exc.rows
-                all_matched = False
-                messages.error(request, exc.message)
-            else:
-                _log_activity(
-                    po,
-                    'po_created',
-                    f'Purchase order generated from bulk inventory match ({len(bulk_rows)} items).',
-                    request.user,
-                    {'po_number': po.po_number, 'item_count': len(bulk_rows)},
-                )
-                _log_system_po_event(
-                    request.user,
-                    SystemAuditLog.ACTION_PO_CHANGE,
-                    'purchase_orders',
-                    f'Bulk-generated purchase order {po.po_number} from inventory match.',
-                    po,
-                )
-                log_vendor_activity(
-                    po.vendor,
-                    VendorActivityLog.TYPE_PO_CREATED,
-                    f'Purchase order {po.po_number} created for {po.project_site_name} via bulk inventory match.',
-                    request.user,
-                )
-                messages.success(request, f'Purchase order {po.po_number} generated with {len(bulk_rows)} matched items.')
-                return redirect('purchase-order-detail', pk=po.pk)
-
-    context = {
-        'page_title': 'Bulk Inventory PO Generator',
-        'procurement_nav': True,
-        'po_form': form,
-        'bulk_rows': bulk_rows,
-        'items_payload': items_payload,
-        'all_matched': all_matched,
-    }
-    return render(request, 'purchase_order_bulk_generator.html', context)
-
-
 def purchase_order_vendor_options_api(request):
     if request.method != 'GET':
         return JsonResponse({'error': 'GET required'}, status=405)
@@ -443,213 +292,56 @@ def purchase_order_bulk_generate_api(request):
     })
 
 
-def purchase_order_detail(request, pk):
-    po = get_object_or_404(PurchaseOrder.objects.select_related('vendor', 'created_by', 'approved_by'), pk=pk)
-    active_tab = request.GET.get('tab') or 'details'
-    forms = _po_form_context(po=po, request=request)
-
-    if request.method == 'POST':
-        action = request.POST.get('action') or ''
-
-        if action == 'update_po':
-            form = PurchaseOrderForm(request.POST, request.FILES, instance=po, prefix='po')
-            if form.is_valid():
-                form.save()
-                _log_activity(po, 'po_updated', 'PO master details updated.', request.user)
-                _log_system_po_event(
-                    request.user,
-                    SystemAuditLog.ACTION_PO_CHANGE,
-                    'purchase_orders',
-                    f'Updated purchase order {po.po_number}.',
-                    po,
-                )
-                po.refresh_progress()
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=details")
-            forms['po_form'] = form
-            active_tab = 'details'
-
-        elif action == 'add_item':
-            form = PurchaseOrderItemForm(request.POST, prefix='item')
-            if form.is_valid():
-                item = form.save(commit=False)
-                item.po = po
-                item.save()
-                _log_activity(po, 'item_added', f'Added PO item {item.material_name}.', request.user)
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=items")
-            forms['item_form'] = form
-            active_tab = 'items'
-
-        elif action == 'add_reference':
-            form = PurchaseOrderReferenceCodeForm(request.POST, request.FILES, prefix='ref')
-            if form.is_valid():
-                reference = form.save(commit=False)
-                reference.po = po
-                reference.save()
-                _log_activity(po, 'reference_added', f'Added reference code {reference.reference_code}.', request.user)
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=references")
-            forms['reference_form'] = form
-            active_tab = 'references'
-
-        elif action == 'add_delivery':
-            form = DeliveryForm(request.POST, request.FILES, prefix='delivery')
-            form.fields['po_item'].queryset = po.items.all()
-            if form.is_valid():
-                delivery = form.save(commit=False)
-                delivery.po = po
-                delivery.save()
-                _log_activity(po, 'delivery_added', f'Added delivery {delivery.delivery_reference_code}.', request.user)
-                _log_system_po_event(
-                    request.user,
-                    SystemAuditLog.ACTION_PO_CHANGE,
-                    'deliveries',
-                    f'Added delivery {delivery.delivery_reference_code} against {po.po_number}.',
-                    po,
-                    {'delivery_reference_code': delivery.delivery_reference_code},
-                )
-                log_vendor_activity(
-                    po.vendor,
-                    VendorActivityLog.TYPE_DELIVERY_UPDATED,
-                    f'Delivery {delivery.delivery_reference_code} recorded for {delivery.po_item.material_name}.',
-                    request.user,
-                )
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=deliveries")
-            forms['delivery_form'] = form
-            active_tab = 'deliveries'
-
-        elif action == 'add_vehicle':
-            form = VehicleMovementForm(request.POST, prefix='vehicle')
-            if form.is_valid():
-                delivery_id = request.POST.get('vehicle-delivery')
-                delivery = get_object_or_404(po.deliveries, pk=delivery_id)
-                vehicle = form.save(commit=False)
-                vehicle.delivery = delivery
-                vehicle.save()
-                _log_activity(po, 'vehicle_added', f'Added vehicle {vehicle.vehicle_number}.', request.user)
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=vehicles")
-            forms['vehicle_form'] = form
-            active_tab = 'vehicles'
-
-        elif action == 'add_invoice':
-            form = DeliveryInvoiceChallanForm(request.POST, request.FILES, prefix='invoice')
-            form.fields['delivery'].queryset = po.deliveries.all()
-            if form.is_valid():
-                invoice = form.save(commit=False)
-                invoice.po = po
-                invoice.save()
-                _log_activity(po, 'invoice_added', f'Recorded invoice/challan {invoice.invoice_number or invoice.challan_number}.', request.user)
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=invoices")
-            forms['invoice_form'] = form
-            active_tab = 'invoices'
-
-        elif action == 'add_payment':
-            form = VendorPaymentForm(request.POST, request.FILES, prefix='payment')
-            form.fields['related_delivery'].queryset = po.deliveries.all()
-            form.fields['related_invoice'].queryset = po.invoice_challans.all()
-            if form.is_valid():
-                payment = form.save(commit=False)
-                payment.po = po
-                payment.vendor = po.vendor
-                payment.save()
-                _log_activity(po, 'payment_added', f'Added payment reference {payment.payment_reference_code}.', request.user)
-                _log_system_po_event(
-                    request.user,
-                    SystemAuditLog.ACTION_PAYMENT_UPDATE,
-                    'payments',
-                    f'Logged payment {payment.payment_reference_code} for {po.po_number}.',
-                    po,
-                    {'payment_reference_code': payment.payment_reference_code},
-                )
-                log_vendor_activity(
-                    po.vendor,
-                    VendorActivityLog.TYPE_PAYMENT_FOLLOWUP,
-                    f'Payment stage {payment.get_payment_stage_display()} logged with reference {payment.payment_reference_code}.',
-                    request.user,
-                )
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=payments")
-            forms['payment_form'] = form
-            active_tab = 'payments'
-
-        elif action == 'add_document':
-            form = BusinessDocumentForm(request.POST, request.FILES, prefix='document')
-            form.fields['delivery'].queryset = po.deliveries.all()
-            form.fields['vehicle'].queryset = VehicleMovement.objects.filter(delivery__po=po)
-            form.fields['payment'].queryset = po.payments.all()
-            form.fields['reference_code'].queryset = po.reference_codes.all()
-            if form.is_valid():
-                document = form.save(commit=False)
-                document.po = po
-                document.uploaded_by = request.user if request.user.is_authenticated else None
-                document.save()
-                _log_activity(po, 'document_added', f'Uploaded document {document.title}.', request.user)
-                _log_system_po_event(
-                    request.user,
-                    SystemAuditLog.ACTION_PO_CHANGE,
-                    'documents',
-                    f'Uploaded document {document.title} for {po.po_number}.',
-                    po,
-                    {'document_title': document.title},
-                )
-                log_vendor_activity(
-                    po.vendor,
-                    VendorActivityLog.TYPE_DOCUMENT_UPLOADED,
-                    f'Document uploaded: {document.title}.',
-                    request.user,
-                )
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=documents")
-            forms['document_form'] = form
-            active_tab = 'documents'
-
-        elif action == 'add_activity':
-            form = PurchaseOrderActivityLogForm(request.POST, prefix='activity')
-            if form.is_valid():
-                entry = form.save(commit=False)
-                entry.po = po
-                entry.actor = request.user if request.user.is_authenticated else None
-                entry.save()
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=activity")
-            forms['activity_form'] = form
-            active_tab = 'activity'
-
-        elif action == 'add_notification':
-            form = NotificationLogForm(request.POST, prefix='notify')
-            form.fields['delivery'].queryset = po.deliveries.all()
-            form.fields['payment'].queryset = po.payments.all()
-            if form.is_valid():
-                notification = form.save(commit=False)
-                notification.po = po
-                notification.save()
-                _log_activity(po, 'notification_logged', f'Logged {notification.channel} notification.', request.user)
-                return redirect(f"{reverse('purchase-order-detail', kwargs={'pk': po.pk})}?tab=documents")
-            forms['notification_form'] = form
-            active_tab = 'documents'
-
-    po.refresh_progress()
-    context = {
-        'page_title': po.po_number,
-        'procurement_nav': True,
-        'po': po,
-        'active_tab': active_tab,
-        'items': po.items.all(),
-        'references': po.reference_codes.all(),
-        'deliveries': po.deliveries.select_related('po_item').all(),
-        'vehicles': VehicleMovement.objects.filter(delivery__po=po).select_related('delivery').all(),
-        'invoice_rows': po.invoice_challans.select_related('delivery').all(),
-        'payments': po.payments.select_related('related_delivery', 'related_invoice').all(),
-        'documents': po.documents.select_related('delivery', 'vehicle', 'payment', 'reference_code').all(),
-        'notifications': po.notifications.select_related('delivery', 'payment').all(),
-        'activity_logs': po.activity_logs.select_related('actor').all(),
-        **forms,
-    }
-    return render(request, 'purchase_order_detail.html', context)
-
-
 def purchase_order_dashboard_api(request):
-    po_queryset = PurchaseOrder.objects.all()
+    po_queryset = PurchaseOrder.objects.select_related('vendor')
+    payment_queryset = VendorPayment.objects.select_related('po', 'vendor')
+    delivery_queryset = Delivery.objects.select_related('po', 'po_item')
+    vehicle_queryset = VehicleMovement.objects.select_related('delivery', 'delivery__po')
+
+    total_po_value = po_queryset.aggregate(total=Sum('total_po_value'))['total'] or Decimal('0.00')
+    paid_amount = payment_queryset.exclude(payment_status='rejected').aggregate(total=Sum('net_payable'))['total'] or Decimal('0.00')
+    pending_vendor_payments = payment_queryset.filter(payment_status__in=['pending', 'approved', 'hold']).count()
+    pending_deliveries = delivery_queryset.filter(delivery_status__in=['pending', 'in_transit', 'partially_received']).count()
+    in_transit_vehicles = vehicle_queryset.filter(vehicle_status__in=['dispatched', 'in_transit']).count()
+    delayed_deliveries = vehicle_queryset.filter(
+        expected_arrival_date__lt=timezone.localdate(),
+    ).exclude(vehicle_status__in=['reached_site', 'unloaded']).count()
+
+    delivered_quantity = po_queryset.aggregate(total=Sum('items__delivered_quantity'))['total'] or Decimal('0.00')
+    pending_quantity = po_queryset.aggregate(total=Sum('items__pending_quantity'))['total'] or Decimal('0.00')
+
+    vendor_outstanding = [
+        {
+            'vendor_tracking_id': row['vendor_tracking_id'],
+            'vendor_tracking_name': row['vendor_tracking_name'],
+            'total_outstanding': str(row['total_outstanding'] or Decimal('0.00')),
+        }
+        for row in po_queryset.values('vendor_tracking_id', 'vendor_tracking_name')
+        .annotate(total_outstanding=Sum('outstanding_amount'))
+        .order_by('-total_outstanding')[:8]
+    ]
+
+    po_status_rows = [
+        {'status': row['status'], 'total': row['total']}
+        for row in po_queryset.values('status').annotate(total=Count('id')).order_by('status')
+    ]
+
+    recent_pos = [serialize_purchase_order(po) for po in po_queryset.order_by('-created_at')[:6]]
+
     payload = {
         'total_pos': po_queryset.count(),
-        'total_po_value': str(po_queryset.aggregate(total=Sum('total_po_value'))['total'] or Decimal('0.00')),
-        'total_paid_amount': str(po_queryset.aggregate(total=Sum('paid_amount'))['total'] or Decimal('0.00')),
-        'total_outstanding_amount': str(po_queryset.aggregate(total=Sum('outstanding_amount'))['total'] or Decimal('0.00')),
+        'total_po_value': str(total_po_value),
+        'total_paid_amount': str(paid_amount),
+        'total_outstanding_amount': str(max(total_po_value - paid_amount, Decimal('0.00'))),
+        'pending_deliveries': pending_deliveries,
+        'in_transit_vehicles': in_transit_vehicles,
+        'delayed_deliveries': delayed_deliveries,
+        'delivered_quantity': str(delivered_quantity),
+        'pending_quantity': str(pending_quantity),
+        'pending_vendor_payments': pending_vendor_payments,
+        'recent_pos': recent_pos,
+        'vendor_outstanding': vendor_outstanding,
+        'po_status_rows': po_status_rows,
     }
     return JsonResponse(payload)
 
@@ -658,10 +350,21 @@ def purchase_order_detail_api(request, pk):
     po = get_object_or_404(PurchaseOrder.objects.select_related('vendor'), pk=pk)
     payload = serialize_purchase_order(po)
     payload.update({
-        'items': list(po.items.values('material_category', 'material_name', 'ordered_quantity', 'delivered_quantity', 'pending_quantity')),
-        'references': list(po.reference_codes.values('reference_code', 'reference_type', 'date')),
-        'deliveries': list(po.deliveries.values('delivery_reference_code', 'delivery_date', 'delivered_quantity', 'delivery_status')),
-        'payments': list(po.payments.values('payment_reference_code', 'payment_stage', 'net_payable', 'payment_status')),
+        'items': list(po.items.values(
+            'id', 'material_category', 'material_name', 'specification', 'brand', 'model',
+            'unit', 'ordered_quantity', 'unit_rate', 'gst_percentage', 'total_amount',
+            'delivered_quantity', 'pending_quantity', 'item_status',
+        )),
+        'references': list(po.reference_codes.values('id', 'reference_code', 'reference_type', 'date')),
+        'deliveries': list(po.deliveries.values(
+            'id', 'delivery_reference_code', 'po_item_id', 'delivery_date',
+            'delivered_quantity', 'delivery_status',
+        )),
+        'payments': list(po.payments.values(
+            'id', 'payment_reference_code', 'payment_stage', 'payment_amount',
+            'net_payable', 'payment_due_date', 'payment_status',
+        )),
+        'documents': list(po.documents.values('id', 'title', 'document_type', 'file', 'created_at')),
     })
     return JsonResponse(payload)
 

@@ -21,7 +21,7 @@
                 {% if request.user.is_authenticated %}
                 <a class="nav-link app-nav-link {% if request.path == '/' %}active{% endif %}" href="/">Dashboard</a>
                 {% if is_admin or user_perms.purchase_orders.can_view %}
-                <a class="nav-link app-nav-link {% if '/procurement/' in request.path %}active{% endif %}" href="{% url 'procurement-dashboard' %}">PO Tracking</a>
+                <a class="nav-link app-nav-link {% if '/procurement/' in request.path %}active{% endif %}" href="/purchase-orders/dashboard">PO Tracking</a>
                 {% endif %}
                 {% if is_admin or user_perms.projects.can_view %}
                 <a class="nav-link app-nav-link {% if '/projects/' in request.path %}active{% endif %}" href="{% url 'project-module' %}">Project Module</a>
@@ -127,11 +127,11 @@
             {% endif %}
             {% if procurement_nav %}
             <nav class="module-subnav mb-4">
-                <a class="module-subnav-link {% if request.path == '/procurement/' %}active{% endif %}" href="{% url 'procurement-dashboard' %}">Overview</a>
+                <a class="module-subnav-link" href="/purchase-orders/dashboard">Overview</a>
                 <a class="module-subnav-link {% if request.path == '/procurement/vendors/' %}active{% endif %}" href="{% url 'procurement-vendor-master' %}">Vendor Master</a>
-                <a class="module-subnav-link {% if '/procurement/purchase-orders/' in request.path and 'bulk-generate' not in request.path %}active{% endif %}" href="{% url 'purchase-order-master' %}">PO Master</a>
-                <a class="module-subnav-link {% if 'bulk-generate' in request.path %}active{% endif %}" href="{% url 'purchase-order-bulk-generator' %}">Bulk PO Generator</a>
-                <a class="module-subnav-link {% if request.path == '/procurement/reports/' %}active{% endif %}" href="{% url 'procurement-reports' %}">Reports</a>
+                <a class="module-subnav-link" href="/purchase-orders">PO Master</a>
+                <a class="module-subnav-link" href="/purchase-orders/bulk-generate">Bulk PO Generator</a>
+                <a class="module-subnav-link" href="/reports">Reports</a>
             </nav>
             {% endif %}
             {% if project_module_nav %}

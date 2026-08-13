@@ -11,6 +11,8 @@ import VendorCreate  from './pages/vendors/VendorCreate'
 import POList        from './pages/purchase-orders/POList'
 import PODetail      from './pages/purchase-orders/PODetail'
 import POCreate      from './pages/purchase-orders/POCreate'
+import ProcurementDashboard from './pages/purchase-orders/ProcurementDashboard'
+import POBulkGenerator      from './pages/purchase-orders/POBulkGenerator'
 import DeliveryList  from './pages/deliveries/DeliveryList'
 import PaymentList   from './pages/payments/PaymentList'
 import ProjectList   from './pages/projects/ProjectList'
@@ -56,6 +58,8 @@ export default function App() {
             <Route path="vendors/:id"            element={<VendorDetail />}  />
             <Route path="purchase-orders"        element={<POList />}        />
             <Route path="purchase-orders/new"    element={<POCreate />}      />
+            <Route path="purchase-orders/dashboard"     element={<ProcurementDashboard />} />
+            <Route path="purchase-orders/bulk-generate" element={<POBulkGenerator />}      />
             <Route path="purchase-orders/:id"    element={<PODetail />}      />
             <Route path="deliveries"             element={<DeliveryList />}  />
             <Route path="payments"               element={<PaymentList />}   />

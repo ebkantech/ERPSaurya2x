@@ -22,7 +22,26 @@ from core.views import (
     update_vendor,
     vendor_list_api,
 )
-from purchase_orders.views import purchase_order_bulk_check
+from purchase_orders.views import (
+    po_activity_create_api,
+    po_delivery_create_api,
+    po_document_create_api,
+    po_invoice_create_api,
+    po_item_create_api,
+    po_notification_create_api,
+    po_payment_create_api,
+    po_reference_create_api,
+    po_vehicle_create_api,
+    purchase_order_bulk_check,
+    purchase_order_bulk_generate_api,
+    purchase_order_create_api,
+    purchase_order_dashboard_api,
+    purchase_order_detail_api,
+    purchase_order_list_api,
+    purchase_order_update_api,
+    purchase_order_vendor_options_api,
+)
+from reports.views import report_center_api, saved_report_create_api
 import os
 
 admin.site.site_header = 'OmegaERP Admin Panel'
@@ -75,6 +94,24 @@ urlpatterns = [
     # Vendor onboarding-fee payment gateway (Razorpay)
     path('api/payments/', include('payments.urls')),
     path('api/purchase-orders/bulk-generate/check/', purchase_order_bulk_check, name='api-po-bulk-check'),
+    path('api/purchase-orders/bulk-generate/', purchase_order_bulk_generate_api, name='api-po-bulk-generate'),
+    path('api/purchase-orders/dashboard/', purchase_order_dashboard_api, name='api-po-dashboard'),
+    path('api/purchase-orders/vendor-options/', purchase_order_vendor_options_api, name='api-po-vendor-options'),
+    path('api/purchase-orders/create/', purchase_order_create_api, name='api-po-create'),
+    path('api/purchase-orders/', purchase_order_list_api, name='api-po-list'),
+    path('api/purchase-orders/<int:pk>/', purchase_order_detail_api, name='api-po-detail'),
+    path('api/purchase-orders/<int:pk>/update/', purchase_order_update_api, name='api-po-update'),
+    path('api/purchase-orders/<int:pk>/items/', po_item_create_api, name='api-po-item-create'),
+    path('api/purchase-orders/<int:pk>/references/', po_reference_create_api, name='api-po-reference-create'),
+    path('api/purchase-orders/<int:pk>/deliveries/', po_delivery_create_api, name='api-po-delivery-create'),
+    path('api/purchase-orders/<int:pk>/vehicles/', po_vehicle_create_api, name='api-po-vehicle-create'),
+    path('api/purchase-orders/<int:pk>/invoices/', po_invoice_create_api, name='api-po-invoice-create'),
+    path('api/purchase-orders/<int:pk>/payments/', po_payment_create_api, name='api-po-payment-create'),
+    path('api/purchase-orders/<int:pk>/documents/', po_document_create_api, name='api-po-document-create'),
+    path('api/purchase-orders/<int:pk>/activity/', po_activity_create_api, name='api-po-activity-create'),
+    path('api/purchase-orders/<int:pk>/notifications/', po_notification_create_api, name='api-po-notification-create'),
+    path('api/reports/', report_center_api, name='api-reports'),
+    path('api/reports/saved/create/', saved_report_create_api, name='api-reports-saved-create'),
 
     # Django backend modules (templates + JSON endpoints)
     path('administration/', include('administration.urls')),
