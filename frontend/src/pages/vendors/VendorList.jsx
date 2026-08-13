@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Search, Plus, Building2, MapPin, Mail, ChevronRight, SlidersHorizontal, Loader2, Copy, ExternalLink, Clock, CheckCircle2 } from 'lucide-react'
+import { Search, Plus, Building2, MapPin, Mail, ChevronRight, SlidersHorizontal, Loader2, Copy, ExternalLink, Clock, CheckCircle2, RefreshCw, Landmark } from 'lucide-react'
 import api from '../../services/api'
 
 const VENDORS_URL = '/vendors/'
@@ -15,15 +15,45 @@ export default function VendorList() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('All')
   const [copied, setCopied] = useState('') // vendor_id whose link was just copied
+  const [companyBank, setCompanyBank] = useState({}) // receiving account for the fee
+  const [resending, setResending] = useState('') // vendor_id currently regenerating a link
+  const [notice, setNotice] = useState('') // transient success/error banner
 
   useEffect(() => {
     let active = true
     api.get(VENDORS_URL)
-      .then(res => { if (active) setVendors(res.data.vendors || []) })
+      .then(res => {
+        if (!active) return
+        setVendors(res.data.vendors || [])
+        setCompanyBank(res.data.company_bank || {})
+      })
       .catch(() => { if (active) setError('Could not load vendors.') })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [])
+
+  const hasCompanyBank = Object.keys(companyBank).length > 0
+
+  const resendLink = async (e, v) => {
+    e.preventDefault(); e.stopPropagation()
+    if (resending) return
+    setResending(v.vendor_id)
+    setNotice('')
+    try {
+      const res = await api.post(`/vendors/${v.vendor_id}/resend-link/`)
+      const url = res.data.payment_link_url || ''
+      setVendors(prev => prev.map(row =>
+        row.vendor_id === v.vendor_id ? { ...row, payment_link_url: url } : row
+      ))
+      setNotice(`A fresh payment link was generated and emailed to ${res.data.sent_to || 'the vendor'}.`)
+      setTimeout(() => setNotice(''), 5000)
+    } catch (err) {
+      setNotice(err.response?.data?.error || 'Could not generate a new payment link.')
+      setTimeout(() => setNotice(''), 5000)
+    } finally {
+      setResending('')
+    }
+  }
 
   const isPending = (v) => v.registration_status === 'pending_payment'
 
@@ -95,6 +125,11 @@ export default function VendorList() {
         <span className="text-xs text-slate-400 font-medium">{filtered.length} results</span>
       </div>
 
+      {/* Transient banner for resend results */}
+      {notice && (
+        <div className="bg-brand-50 border border-brand-200 text-brand-700 text-sm rounded-xl px-4 py-3">{notice}</div>
+      )}
+
       {/* States */}
       {loading && (
         <div className="flex items-center gap-2 text-sm text-slate-500 py-16 justify-center">
@@ -148,23 +183,61 @@ export default function VendorList() {
                   </div>
                 </div>
 
-                {/* Payment link — only for vendors still owing the fee */}
-                {pending && v.payment_link_url && (
+                {/* Payment panel — for vendors still owing the fee. The vendor
+                    is already saved to the list; admin can regenerate/resend the
+                    link, or the vendor can pay into the company account below. */}
+                {pending && (
                   <div className="mb-4 rounded-lg bg-amber-50 border border-amber-100 px-3 py-2.5">
                     <p className="text-xs font-medium text-amber-800 mb-1.5">
                       Onboarding fee unpaid — final registration is on hold until the vendor pays.
                     </p>
-                    <div className="flex items-center gap-1.5">
-                      <button onClick={(e) => copyLink(e, v)}
-                        className="flex items-center gap-1 text-xs font-medium text-amber-800 bg-white border border-amber-200 rounded-md px-2 py-1 hover:bg-amber-100 transition">
-                        <Copy size={11} />{copied === v.vendor_id ? 'Copied' : 'Copy link'}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {v.payment_link_url && (
+                        <>
+                          <button onClick={(e) => copyLink(e, v)}
+                            className="flex items-center gap-1 text-xs font-medium text-amber-800 bg-white border border-amber-200 rounded-md px-2 py-1 hover:bg-amber-100 transition">
+                            <Copy size={11} />{copied === v.vendor_id ? 'Copied' : 'Copy link'}
+                          </button>
+                          <a href={v.payment_link_url} target="_blank" rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex items-center gap-1 text-xs font-medium text-amber-800 bg-white border border-amber-200 rounded-md px-2 py-1 hover:bg-amber-100 transition">
+                            <ExternalLink size={11} />Open
+                          </a>
+                        </>
+                      )}
+                      <button onClick={(e) => resendLink(e, v)} disabled={resending === v.vendor_id}
+                        className="flex items-center gap-1 text-xs font-medium text-amber-800 bg-white border border-amber-200 rounded-md px-2 py-1 hover:bg-amber-100 transition disabled:opacity-60">
+                        {resending === v.vendor_id
+                          ? <><Loader2 size={11} className="animate-spin" />Sending…</>
+                          : <><RefreshCw size={11} />{v.payment_link_url ? 'Try again' : 'Send link'}</>}
                       </button>
-                      <a href={v.payment_link_url} target="_blank" rel="noopener noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex items-center gap-1 text-xs font-medium text-amber-800 bg-white border border-amber-200 rounded-md px-2 py-1 hover:bg-amber-100 transition">
-                        <ExternalLink size={11} />Open
-                      </a>
                     </div>
+
+                    {/* Direct bank transfer alternative (company receiving account) */}
+                    {hasCompanyBank && (
+                      <div className="mt-2.5 pt-2.5 border-t border-amber-200/70">
+                        <p className="flex items-center gap-1 text-xs font-semibold text-amber-800 mb-1">
+                          <Landmark size={11} />Or pay by direct bank transfer
+                        </p>
+                        <dl className="text-xs text-amber-900/90 space-y-0.5">
+                          {companyBank.account_name && (
+                            <div className="flex gap-1"><dt className="text-amber-700/80">A/C name:</dt><dd className="font-medium">{companyBank.account_name}</dd></div>
+                          )}
+                          {companyBank.account_number && (
+                            <div className="flex gap-1"><dt className="text-amber-700/80">A/C no:</dt><dd className="font-medium">{companyBank.account_number}</dd></div>
+                          )}
+                          {companyBank.ifsc && (
+                            <div className="flex gap-1"><dt className="text-amber-700/80">IFSC:</dt><dd className="font-medium">{companyBank.ifsc}</dd></div>
+                          )}
+                          {companyBank.bank_name && (
+                            <div className="flex gap-1"><dt className="text-amber-700/80">Bank:</dt><dd className="font-medium">{companyBank.bank_name}{companyBank.branch ? `, ${companyBank.branch}` : ''}</dd></div>
+                          )}
+                          {companyBank.upi && (
+                            <div className="flex gap-1"><dt className="text-amber-700/80">UPI:</dt><dd className="font-medium">{companyBank.upi}</dd></div>
+                          )}
+                        </dl>
+                      </div>
+                    )}
                   </div>
                 )}
 

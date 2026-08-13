@@ -38,6 +38,22 @@ def registration_currency():
     return settings.VENDOR_REGISTRATION_FEE_CURRENCY or 'INR'
 
 
+def company_bank_details():
+    """Non-secret company receiving-account details for the onboarding fee.
+    Returns a dict of only the populated fields (empty dict when nothing is
+    configured) so the frontend can offer a direct bank-transfer alternative to
+    the hosted payment link."""
+    fields = {
+        'account_name': settings.COMPANY_BANK_ACCOUNT_NAME,
+        'account_number': settings.COMPANY_BANK_ACCOUNT_NUMBER,
+        'ifsc': settings.COMPANY_BANK_IFSC,
+        'bank_name': settings.COMPANY_BANK_NAME,
+        'branch': settings.COMPANY_BANK_BRANCH,
+        'upi': settings.COMPANY_BANK_UPI,
+    }
+    return {key: value for key, value in fields.items() if (value or '').strip()}
+
+
 def _client():
     import razorpay
 

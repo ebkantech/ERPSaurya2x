@@ -169,6 +169,17 @@ RAZORPAY_WEBHOOK_SECRET = env('RAZORPAY_WEBHOOK_SECRET', default='')
 VENDOR_REGISTRATION_FEE = env.int('VENDOR_REGISTRATION_FEE', default=2500)
 VENDOR_REGISTRATION_FEE_CURRENCY = env('VENDOR_REGISTRATION_FEE_CURRENCY', default='INR')
 
+# Company (receiving) bank account for the onboarding fee. Shown on the vendor
+# list next to the payment link so a vendor can pay the fee by direct bank
+# transfer / UPI as an alternative to the Razorpay hosted link. All non-secret;
+# leave blank to hide the "pay by bank transfer" panel entirely.
+COMPANY_BANK_ACCOUNT_NAME = env('COMPANY_BANK_ACCOUNT_NAME', default='')
+COMPANY_BANK_ACCOUNT_NUMBER = env('COMPANY_BANK_ACCOUNT_NUMBER', default='')
+COMPANY_BANK_IFSC = env('COMPANY_BANK_IFSC', default='')
+COMPANY_BANK_NAME = env('COMPANY_BANK_NAME', default='')
+COMPANY_BANK_BRANCH = env('COMPANY_BANK_BRANCH', default='')
+COMPANY_BANK_UPI = env('COMPANY_BANK_UPI', default='')
+
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 SECURE_REFERRER_POLICY = 'same-origin'

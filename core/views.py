@@ -289,8 +289,80 @@ def _serialize_vendor_list_rows(queryset):
 def vendor_list_api(request):
     if request.method != 'GET':
         return JsonResponse({'error': 'GET required'}, status=405)
+    from payments.gateway import company_bank_details
     vendors = Vendor.objects.order_by('-created_at')
-    return JsonResponse({'vendors': _serialize_vendor_list_rows(vendors)})
+    return JsonResponse({
+        'vendors': _serialize_vendor_list_rows(vendors),
+        # Company receiving account, so pending vendors can pay the fee by
+        # direct bank transfer as well as the Razorpay link.
+        'company_bank': company_bank_details(),
+    })
+
+
+@login_required(login_url='/admin/login/')
+def resend_vendor_registration_link(request, vendor_id):
+    """POST → mint a fresh Razorpay Payment Link for an already-saved vendor who
+    hasn't paid the onboarding fee yet, and let Razorpay email it. Used by the
+    "try again" action on the vendor list. A vendor whose latest payment is
+    already paid/linked is left untouched."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+
+    from permissions.utils import get_user_role, is_admin_like
+    from permissions.models import RolePermission
+
+    if not is_admin_like(request.user):
+        role = get_user_role(request.user)
+        if role:
+            perm = RolePermission.objects.filter(role=role, module_key='vendors').first()
+            if not perm or not perm.can_create:
+                return JsonResponse({'error': 'You do not have permission to register vendors.'}, status=403)
+        else:
+            return JsonResponse({'error': 'Access denied.'}, status=403)
+
+    from payments.gateway import GatewayError, is_enabled as payment_gateway_enabled
+    from payments.models import VendorRegistrationPayment
+    from payments.services import create_registration_payment_link
+
+    try:
+        vendor = Vendor.objects.get(vendor_id=vendor_id)
+    except Vendor.DoesNotExist:
+        return JsonResponse({'error': 'Vendor not found'}, status=404)
+
+    if not payment_gateway_enabled():
+        return JsonResponse({'error': 'Payment gateway is not configured.'}, status=503)
+
+    # Don't re-bill a vendor who has already paid.
+    latest = vendor.registration_payments.order_by('-created_at').first()
+    paid_statuses = (VendorRegistrationPayment.STATUS_PAID, VendorRegistrationPayment.STATUS_LINKED)
+    if latest and latest.status in paid_statuses:
+        return JsonResponse({'error': 'This vendor has already paid the onboarding fee.'}, status=400)
+
+    if not vendor.email_id:
+        return JsonResponse({'error': "The vendor's email is required to send a payment link."}, status=400)
+
+    try:
+        with transaction.atomic():
+            payment = create_registration_payment_link(
+                company_name=vendor.company_name,
+                contact_name=vendor.contact_person,
+                contact_email=vendor.email_id,
+                contact_phone=vendor.mobile_number,
+                vendor=vendor,
+            )
+            if vendor.status != 'pending_payment':
+                vendor.status = 'pending_payment'
+                vendor.save(update_fields=['status'])
+    except GatewayError as exc:
+        return JsonResponse({'error': str(exc)}, status=502)
+
+    return JsonResponse({
+        'message': 'A fresh payment link was generated and emailed to the vendor.',
+        'vendor_id': vendor.vendor_id,
+        'payment_link_url': payment.payment_link_url,
+        'payment_status': payment.status,
+        'sent_to': vendor.email_id,
+    })
 
 
 def _clean_vendor_clients(value):

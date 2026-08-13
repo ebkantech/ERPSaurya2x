@@ -18,6 +18,7 @@ from core.views import (
     project_list_api,
     project_options_api,
     register_vendor,
+    resend_vendor_registration_link,
     update_vendor,
     vendor_list_api,
 )
@@ -69,6 +70,7 @@ urlpatterns = [
     path('api/vendors/', vendor_list_api, name='api-vendor-list'),
     path('api/vendors/register/', register_vendor, name='api-vendor-register'),
     path('api/vendors/<str:vendor_id>/update/', update_vendor, name='api-vendor-update'),
+    path('api/vendors/<str:vendor_id>/resend-link/', resend_vendor_registration_link, name='api-vendor-resend-link'),
 
     # Vendor onboarding-fee payment gateway (Razorpay)
     path('api/payments/', include('payments.urls')),
