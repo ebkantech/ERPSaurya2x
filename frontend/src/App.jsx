@@ -31,6 +31,19 @@ import AdminPanel    from './pages/administration/AdminPanel'
 import AssistantPage from './pages/assistant/AssistantPage'
 import NotFound      from './pages/NotFound'
 
+import VendorControlLayout    from './pages/vendor-control/VendorControlLayout'
+import VendorControlDashboard from './pages/vendor-control/VendorControlDashboard'
+import StaffMaster            from './pages/vendor-control/StaffMaster'
+import AssignmentList         from './pages/vendor-control/AssignmentList'
+import BulkAssignment         from './pages/vendor-control/BulkAssignment'
+import Distribution           from './pages/vendor-control/Distribution'
+import AssignmentHistory      from './pages/vendor-control/AssignmentHistory'
+import StaffPerformance       from './pages/vendor-control/StaffPerformance'
+import VendorQueue            from './pages/vendor-control/VendorQueue'
+import VendorControlDetail    from './pages/vendor-control/VendorControlDetail'
+import TaskCenter             from './pages/vendor-control/TaskCenter'
+import Followups              from './pages/vendor-control/Followups'
+
 function PrivateRoute({ children }) {
   const { isAuthenticated } = useAuth()
   return isAuthenticated ? children : <Navigate to="/login" replace />
@@ -85,6 +98,21 @@ export default function App() {
 
             {/* System */}
             <Route path="administration"         element={<AdminPanel />}    />
+
+            {/* Vendor Authorization (staff assignment) */}
+            <Route path="vendor-control" element={<VendorControlLayout />}>
+              <Route index                   element={<VendorControlDashboard />} />
+              <Route path="staff"            element={<StaffMaster />}            />
+              <Route path="assignments"      element={<AssignmentList />}         />
+              <Route path="assignments/bulk" element={<BulkAssignment />}         />
+              <Route path="distribution"     element={<Distribution />}           />
+              <Route path="history"          element={<AssignmentHistory />}      />
+              <Route path="performance"      element={<StaffPerformance />}       />
+              <Route path="vendors"          element={<VendorQueue />}            />
+              <Route path="vendors/:vendorId" element={<VendorControlDetail />}   />
+              <Route path="tasks"            element={<TaskCenter />}             />
+              <Route path="followups"        element={<Followups />}              />
+            </Route>
 
             <Route path="*"                      element={<NotFound />}      />
           </Route>

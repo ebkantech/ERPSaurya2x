@@ -395,6 +395,19 @@ def _api_get_po(pk):
     return get_object_or_404(PurchaseOrder.objects.select_related('vendor'), pk=pk)
 
 
+def _json_or_form_body(request):
+    """React posts plain JSON for these sub-forms (no file fields) — Django
+    never parses `application/json` into `request.POST`, so fall back to
+    parsing the raw body when POST is empty (multipart/form-encoded callers,
+    e.g. ones with file uploads, keep working unchanged)."""
+    if request.POST:
+        return request.POST
+    try:
+        return json.loads(request.body.decode('utf-8') or '{}')
+    except json.JSONDecodeError:
+        return request.POST
+
+
 def purchase_order_update_api(request, pk):
     error = _api_require_post(request)
     if error:
@@ -421,7 +434,7 @@ def po_item_create_api(request, pk):
     if error:
         return error
     po = _api_get_po(pk)
-    form = PurchaseOrderItemForm(request.POST)
+    form = PurchaseOrderItemForm(_json_or_form_body(request))
     if not form.is_valid():
         return _api_validation_error(form)
     item = form.save(commit=False)
@@ -446,7 +459,7 @@ def po_reference_create_api(request, pk):
     if error:
         return error
     po = _api_get_po(pk)
-    form = PurchaseOrderReferenceCodeForm(request.POST, request.FILES)
+    form = PurchaseOrderReferenceCodeForm(_json_or_form_body(request), request.FILES)
     if not form.is_valid():
         return _api_validation_error(form)
     reference = form.save(commit=False)
@@ -469,7 +482,7 @@ def po_delivery_create_api(request, pk):
     if error:
         return error
     po = _api_get_po(pk)
-    form = DeliveryForm(request.POST, request.FILES)
+    form = DeliveryForm(_json_or_form_body(request), request.FILES)
     form.fields['po_item'].queryset = po.items.all()
     if not form.is_valid():
         return _api_validation_error(form)
@@ -508,12 +521,13 @@ def po_vehicle_create_api(request, pk):
     if error:
         return error
     po = _api_get_po(pk)
-    form = VehicleMovementForm(request.POST)
+    body = _json_or_form_body(request)
+    form = VehicleMovementForm(body)
     if 'delivery' in form.fields:
         form.fields['delivery'].queryset = po.deliveries.all()
     if not form.is_valid():
         return _api_validation_error(form)
-    delivery_id = request.POST.get('delivery')
+    delivery_id = body.get('delivery')
     if not delivery_id:
         return JsonResponse({'error': 'A delivery is required for the vehicle movement.', 'field_errors': {'delivery': ['This field is required.']}}, status=400)
     delivery = get_object_or_404(po.deliveries, pk=delivery_id)
@@ -537,7 +551,7 @@ def po_invoice_create_api(request, pk):
     if error:
         return error
     po = _api_get_po(pk)
-    form = DeliveryInvoiceChallanForm(request.POST, request.FILES)
+    form = DeliveryInvoiceChallanForm(_json_or_form_body(request), request.FILES)
     form.fields['delivery'].queryset = po.deliveries.all()
     if not form.is_valid():
         return _api_validation_error(form)
@@ -560,7 +574,7 @@ def po_payment_create_api(request, pk):
     if error:
         return error
     po = _api_get_po(pk)
-    form = VendorPaymentForm(request.POST, request.FILES)
+    form = VendorPaymentForm(_json_or_form_body(request), request.FILES)
     form.fields['related_delivery'].queryset = po.deliveries.all()
     form.fields['related_invoice'].queryset = po.invoice_challans.all()
     if not form.is_valid():
@@ -641,7 +655,7 @@ def po_activity_create_api(request, pk):
     if error:
         return error
     po = _api_get_po(pk)
-    form = PurchaseOrderActivityLogForm(request.POST)
+    form = PurchaseOrderActivityLogForm(_json_or_form_body(request))
     if not form.is_valid():
         return _api_validation_error(form)
     entry = form.save(commit=False)
@@ -663,7 +677,7 @@ def po_notification_create_api(request, pk):
     if error:
         return error
     po = _api_get_po(pk)
-    form = NotificationLogForm(request.POST)
+    form = NotificationLogForm(_json_or_form_body(request))
     if 'delivery' in form.fields:
         form.fields['delivery'].queryset = po.deliveries.all()
     if 'payment' in form.fields:

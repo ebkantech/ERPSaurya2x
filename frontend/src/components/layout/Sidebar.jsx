@@ -6,6 +6,7 @@ import {
   LayoutDashboard, Building2, ShoppingCart, Truck, CreditCard,
   FolderKanban, Package, BarChart3, Settings, LogOut, Zap,
   ChevronRight, ArrowLeftRight, Bell, ClipboardList, Sparkles, PackageSearch,
+  Users as UsersIcon,
 } from 'lucide-react'
 
 const navGroups = [
@@ -45,7 +46,8 @@ const navGroups = [
   {
     label: 'System',
     items: [
-      { label: 'Administration',   icon: Settings,     path: '/administration' },
+      { label: 'Administration',      icon: Settings,   path: '/administration' },
+      { label: 'Vendor Authorization', icon: UsersIcon, path: '/vendor-control' },
     ],
   },
 ]

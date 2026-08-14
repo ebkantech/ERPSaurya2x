@@ -42,6 +42,31 @@ from purchase_orders.views import (
     purchase_order_vendor_options_api,
 )
 from reports.views import report_center_api, saved_report_create_api
+from vendors.views import (
+    accessible_vendors_api,
+    assignment_history_api,
+    assignments_api,
+    available_users_api,
+    my_vendors_api,
+    staff_create_api,
+    staff_list_api,
+    staff_performance_api,
+    vendor_assignment_create_api,
+    vendor_assignment_remove_api,
+    vendor_auto_distribute_api,
+    vendor_bulk_assign_api,
+    vendor_bulk_assign_upload_api,
+    vendor_control_dashboard_api,
+    vendor_control_detail_api,
+    vendor_distribution_api,
+    vendor_note_create_api,
+)
+from tasks.views import (
+    my_followups_api,
+    task_create_api,
+    task_status_update_api,
+    vendor_tasks_api as vendor_control_tasks_api,
+)
 import os
 
 admin.site.site_header = 'OmegaERP Admin Panel'
@@ -113,6 +138,29 @@ urlpatterns = [
     path('api/reports/', report_center_api, name='api-reports'),
     path('api/reports/saved/create/', saved_report_create_api, name='api-reports-saved-create'),
 
+    # Vendor authorization / staff-assignment ("vendor allocation") APIs
+    path('api/vendor-control/dashboard/', vendor_control_dashboard_api, name='api-vc-dashboard'),
+    path('api/vendor-control/staff/', staff_list_api, name='api-vc-staff-list'),
+    path('api/vendor-control/staff/create/', staff_create_api, name='api-vc-staff-create'),
+    path('api/vendor-control/users/', available_users_api, name='api-vc-users'),
+    path('api/vendor-control/vendors/', accessible_vendors_api, name='api-vc-vendor-options'),
+    path('api/vendor-control/my-vendors/', my_vendors_api, name='api-vc-my-vendors'),
+    path('api/vendor-control/vendors/<str:vendor_id>/', vendor_control_detail_api, name='api-vc-vendor-detail'),
+    path('api/vendor-control/vendors/<str:vendor_id>/notes/', vendor_note_create_api, name='api-vc-vendor-notes'),
+    path('api/vendor-control/assignments/', assignments_api, name='api-vc-assignments'),
+    path('api/vendor-control/assignments/create/', vendor_assignment_create_api, name='api-vc-assignment-create'),
+    path('api/vendor-control/assignments/<int:assignment_id>/remove/', vendor_assignment_remove_api, name='api-vc-assignment-remove'),
+    path('api/vendor-control/assignments/bulk/', vendor_bulk_assign_api, name='api-vc-assignments-bulk'),
+    path('api/vendor-control/assignments/bulk/upload/', vendor_bulk_assign_upload_api, name='api-vc-assignments-bulk-upload'),
+    path('api/vendor-control/assignments/auto-distribute/', vendor_auto_distribute_api, name='api-vc-assignments-auto-distribute'),
+    path('api/vendor-control/distribution/', vendor_distribution_api, name='api-vc-distribution'),
+    path('api/vendor-control/history/', assignment_history_api, name='api-vc-history'),
+    path('api/vendor-control/performance/', staff_performance_api, name='api-vc-performance'),
+    path('api/vendor-control/tasks/', vendor_control_tasks_api, name='api-vc-tasks'),
+    path('api/vendor-control/tasks/create/', task_create_api, name='api-vc-task-create'),
+    path('api/vendor-control/tasks/<int:task_id>/status/', task_status_update_api, name='api-vc-task-status'),
+    path('api/vendor-control/followups/', my_followups_api, name='api-vc-followups'),
+
     # Django backend modules (templates + JSON endpoints)
     path('administration/', include('administration.urls')),
     path('procurement/', include('purchase_orders.urls')),
@@ -160,15 +208,19 @@ urlpatterns = [
 
     # Catch-all: serves the React app for everything else React owns
     # (dashboard, purchase-orders, deliveries, payments, transport, tasks,
-    # reports, notifications, assistant, administration, login, and the
-    # client-side 404 page). Paths under prefixes Django exclusively owns
-    # (admin/, api/, static/, administration/, procurement/, vendor-control/,
+    # reports, notifications, assistant, administration, vendor-control,
+    # login, and the client-side 404 page). Paths under prefixes Django
+    # exclusively owns (admin/, api/, static/, administration/, procurement/,
     # signout/, media/) — plus anything under vendors/, projects/,
     # materials/ not explicitly allowed above — are excluded, so a broken
     # or renamed Django route now returns a real 404 instead of silently
-    # rendering the SPA shell.
+    # rendering the SPA shell. `vendor-control/` is NOT excluded even though
+    # Django still owns `vendor-control/api/...` JSON endpoints there —
+    # that `include()` is matched earlier in this list, so those requests
+    # never reach the catch-all regardless; excluding the whole prefix here
+    # would just 404 the React pages that also live under `vendor-control/`.
     re_path(
-        r'^(?!admin/|api/|static/|administration/|procurement/|vendor-control/'
+        r'^(?!admin/|api/|static/|administration/|procurement/'
         r'|signout/|media/|vendors/|projects/|materials/).*$',
         _react_index,
     ),

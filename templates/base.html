@@ -29,7 +29,7 @@
                 {% if is_admin or user_perms.vendors.can_view %}
                 <a class="nav-link app-nav-link {% if '/vendors/' in request.path %}active{% endif %}" href="{% url 'vendor-module' %}">Vendor Module</a>
                 {% endif %}
-                <a class="nav-link app-nav-link {% if '/vendor-control/' in request.path %}active{% endif %}" href="{% url 'vendor-auth-dashboard' %}">Vendor Authorization</a>
+                <a class="nav-link app-nav-link {% if '/vendor-control/' in request.path %}active{% endif %}" href="/vendor-control">Vendor Authorization</a>
                 {% if is_admin or user_perms.vendors.can_view %}
                 <a class="nav-link app-nav-link {% if '/materials/' in request.path %}active{% endif %}" href="{% url 'material-module' %}">Material Master</a>
                 {% endif %}
@@ -82,22 +82,6 @@
                 {% if is_admin or user_perms.vendors.can_create %}
                 <a class="module-subnav-link {% if request.path == '/vendors/registration/' %}active{% endif %}" href="{% url 'vendor-registration' %}">Vendor Registration</a>
                 {% endif %}
-            </nav>
-            {% endif %}
-            {% if vendor_authorization_nav %}
-            <nav class="module-subnav mb-4 flex-wrap">
-                <a class="module-subnav-link {% if request.path == '/vendor-control/' %}active{% endif %}" href="{% url 'vendor-auth-dashboard' %}">Overview</a>
-                {% if is_assignment_admin %}
-                <a class="module-subnav-link {% if request.path == '/vendor-control/staff/' %}active{% endif %}" href="{% url 'vendor-auth-staff-master' %}">Staff Master</a>
-                <a class="module-subnav-link {% if request.path == '/vendor-control/assignments/' %}active{% endif %}" href="{% url 'vendor-auth-assignments' %}">Assignments</a>
-                <a class="module-subnav-link {% if request.path == '/vendor-control/assignments/bulk/' %}active{% endif %}" href="{% url 'vendor-auth-bulk-assignment' %}">Bulk Assignment</a>
-                <a class="module-subnav-link {% if request.path == '/vendor-control/distribution/' %}active{% endif %}" href="{% url 'vendor-auth-distribution' %}">Distribution</a>
-                <a class="module-subnav-link {% if request.path == '/vendor-control/history/' %}active{% endif %}" href="{% url 'vendor-auth-history' %}">History</a>
-                <a class="module-subnav-link {% if request.path == '/vendor-control/performance/' %}active{% endif %}" href="{% url 'vendor-auth-performance' %}">Performance</a>
-                {% endif %}
-                <a class="module-subnav-link {% if request.path == '/vendor-control/my-vendors/' %}active{% endif %}" href="{% url 'vendor-auth-my-vendors' %}">{% if is_assignment_admin %}All Scoped Vendors{% else %}My Vendors{% endif %}</a>
-                <a class="module-subnav-link {% if request.path == '/vendor-control/tasks/' %}active{% endif %}" href="{% url 'vendor-auth-tasks' %}">{% if is_assignment_admin %}All Tasks{% else %}My Tasks{% endif %}</a>
-                <a class="module-subnav-link {% if request.path == '/vendor-control/followups/' %}active{% endif %}" href="{% url 'vendor-auth-followups' %}">Follow-ups</a>
             </nav>
             {% endif %}
             {% if administration_nav %}
