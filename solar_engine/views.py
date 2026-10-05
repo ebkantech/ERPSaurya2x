@@ -95,6 +95,20 @@ def build_lock_view(request, build_id):
     })
 
 
+def build_unlock_view(request, build_id):
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    build = get_object_or_404(ProjectBuild, pk=build_id)
+    try:
+        build = services.unlock_build(build, request.user)
+    except PermissionDenied as exc:
+        return JsonResponse({'error': str(exc)}, status=403)
+    return JsonResponse({'message': 'Build unlocked for editing.', 'build': serialize_build(build)})
+
+
 def sizing_update_view(request, build_id):
     redirect = _auth(request)
     if redirect:
@@ -151,10 +165,38 @@ def workpackage_update_view(request, wp_id):
     redirect = _auth(request)
     if redirect:
         return redirect
-    if request.method not in ('POST', 'PATCH'):
-        return JsonResponse({'error': 'POST/PATCH required'}, status=405)
+    if request.method not in ('POST', 'PATCH', 'DELETE'):
+        return JsonResponse({'error': 'POST/PATCH/DELETE required'}, status=405)
     wp = get_object_or_404(ProjectWorkPackage, pk=wp_id)
+
+    if request.method == 'DELETE':
+        if not wp.stage.build.is_editable:
+            return JsonResponse({'error': 'Build is locked; work breakdown cannot be edited.'}, status=400)
+        wp.delete()
+        return JsonResponse({'message': 'Work package removed.'})
+
     data = _body(request)
+    editable = wp.stage.build.is_editable
+    # Structural edits (name/discipline/order/move) only while draft.
+    if any(k in data for k in ('name', 'discipline', 'order', 'stage_id')) and not editable:
+        return JsonResponse({'error': 'Build is locked; work breakdown cannot be edited.'}, status=400)
+    if 'name' in data:
+        name = (data['name'] or '').strip()
+        if not name:
+            return JsonResponse({'error': 'Work package name cannot be empty.'}, status=400)
+        wp.name = name[:200]
+    if 'discipline' in data:
+        wp.discipline = (data['discipline'] or '').strip()[:80]
+    if 'order' in data:
+        try:
+            wp.order = int(data['order'])
+        except (ValueError, TypeError):
+            return JsonResponse({'error': 'Invalid order.'}, status=400)
+    if 'stage_id' in data and data['stage_id']:
+        target = ProjectStage.objects.filter(pk=data['stage_id'], build=wp.stage.build).first()
+        if not target:
+            return JsonResponse({'error': 'Target stage not found in this build.'}, status=400)
+        wp.stage = target
     if 'status' in data:
         if data['status'] not in dict(C.EXECUTION_STATUS_CHOICES):
             return JsonResponse({'error': 'Invalid status.'}, status=400)
@@ -172,16 +214,63 @@ def workpackage_update_view(request, wp_id):
     return JsonResponse({'message': 'Work package updated.', 'work_package': serialize_work_package(wp)})
 
 
-def stage_update_view(request, stage_id):
-    """Update a stage's execution status and milestone dates
-    (planned/actual start & end)."""
+def workpackage_create_view(request, stage_id):
+    """Add a work package to a stage (choose from library or custom)."""
     redirect = _auth(request)
     if redirect:
         return redirect
-    if request.method not in ('POST', 'PATCH'):
-        return JsonResponse({'error': 'POST/PATCH required'}, status=405)
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
     stage = get_object_or_404(ProjectStage, pk=stage_id)
+    if not stage.build.is_editable:
+        return JsonResponse({'error': 'Build is locked; work breakdown cannot be edited.'}, status=400)
     data = _body(request)
+    name = (data.get('name') or '').strip()
+    if not name:
+        return JsonResponse({'error': 'Work package name is required.'}, status=400)
+    order = stage.work_packages.count() + 1
+    wp = ProjectWorkPackage.objects.create(
+        stage=stage, name=name[:200], discipline=(data.get('discipline') or '').strip()[:80], order=order,
+    )
+    return JsonResponse({'message': 'Work package added.', 'work_package': serialize_work_package(wp)}, status=201)
+
+
+def stage_update_view(request, stage_id):
+    """Update a stage: title/code/description/order (draft only), plus
+    execution status and milestone dates; DELETE removes the stage."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    if request.method not in ('POST', 'PATCH', 'DELETE'):
+        return JsonResponse({'error': 'POST/PATCH/DELETE required'}, status=405)
+    stage = get_object_or_404(ProjectStage, pk=stage_id)
+
+    if request.method == 'DELETE':
+        if not stage.build.is_editable:
+            return JsonResponse({'error': 'Build is locked; work breakdown cannot be edited.'}, status=400)
+        stage.delete()
+        return JsonResponse({'message': 'Stage removed.'})
+
+    data = _body(request)
+    editable = stage.build.is_editable
+    if any(k in data for k in ('name', 'code', 'description', 'order', 'is_parallel')) and not editable:
+        return JsonResponse({'error': 'Build is locked; work breakdown cannot be edited.'}, status=400)
+    if 'name' in data:
+        name = (data['name'] or '').strip()
+        if not name:
+            return JsonResponse({'error': 'Stage name cannot be empty.'}, status=400)
+        stage.name = name[:200]
+    if 'code' in data:
+        stage.code = (data['code'] or '').strip()[:30]
+    if 'description' in data:
+        stage.description = str(data['description'])
+    if 'is_parallel' in data:
+        stage.is_parallel = bool(data['is_parallel'])
+    if 'order' in data:
+        try:
+            stage.order = int(data['order'])
+        except (ValueError, TypeError):
+            return JsonResponse({'error': 'Invalid order.'}, status=400)
     if 'status' in data:
         if data['status'] not in dict(C.EXECUTION_STATUS_CHOICES):
             return JsonResponse({'error': 'Invalid status.'}, status=400)
@@ -195,6 +284,82 @@ def stage_update_view(request, stage_id):
     except (ValueError, ValidationError):
         return JsonResponse({'error': 'Invalid date value (use YYYY-MM-DD).'}, status=400)
     return JsonResponse({'message': 'Stage updated.', 'stage': serialize_stage(stage)})
+
+
+def stage_create_view(request, build_id):
+    """Add a new stage to a build's work breakdown."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    build = get_object_or_404(ProjectBuild, pk=build_id)
+    if not build.is_editable:
+        return JsonResponse({'error': 'Build is locked; work breakdown cannot be edited.'}, status=400)
+    data = _body(request)
+    name = (data.get('name') or '').strip()
+    if not name:
+        return JsonResponse({'error': 'Stage name is required.'}, status=400)
+    order = build.stages.count() + 1
+    code = (data.get('code') or '').strip()[:30] or f'S{order}'
+    stage = ProjectStage.objects.create(
+        build=build, name=name[:200], code=code, description=str(data.get('description') or ''),
+        is_parallel=bool(data.get('is_parallel')), order=order,
+    )
+    return JsonResponse({'message': 'Stage added.', 'stage': serialize_stage(stage)}, status=201)
+
+
+def wbs_reorder_view(request, build_id):
+    """Persist new ordering. Body may include:
+      {"stages": [id, id, ...]}  -> stage order
+      {"stage_id": X, "work_packages": [id, ...]}  -> WP order within a stage
+    """
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    build = get_object_or_404(ProjectBuild, pk=build_id)
+    if not build.is_editable:
+        return JsonResponse({'error': 'Build is locked; work breakdown cannot be edited.'}, status=400)
+    data = _body(request)
+
+    stage_ids = data.get('stages')
+    if isinstance(stage_ids, list):
+        valid = set(build.stages.values_list('id', flat=True))
+        for idx, sid in enumerate(stage_ids, 1):
+            if sid in valid:
+                ProjectStage.objects.filter(pk=sid).update(order=idx)
+
+    wp_ids = data.get('work_packages')
+    if isinstance(wp_ids, list) and data.get('stage_id'):
+        stage = build.stages.filter(pk=data['stage_id']).first()
+        if stage:
+            valid = set(ProjectWorkPackage.objects.filter(stage__build=build).values_list('id', flat=True))
+            for idx, wid in enumerate(wp_ids, 1):
+                if wid in valid:
+                    ProjectWorkPackage.objects.filter(pk=wid).update(order=idx)
+    return JsonResponse({'message': 'Order updated.'})
+
+
+def wbs_library_view(request):
+    """Catalog of stage names + work-package names drawn from all WBS
+    templates, so a PM can pick options when editing a project's breakdown."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    from .models import WbsStage, WbsWorkPackage
+    mode = (request.GET.get('mode') or '').strip()
+    stage_qs = WbsStage.objects.all()
+    wp_qs = WbsWorkPackage.objects.all()
+    if mode:
+        stage_qs = stage_qs.filter(template__project_type=mode)
+        wp_qs = wp_qs.filter(stage__template__project_type=mode)
+    stages = sorted({(s.name or '').strip() for s in stage_qs if (s.name or '').strip()})
+    packages = sorted({(w.name or '').strip() for w in wp_qs if (w.name or '').strip()})
+    return JsonResponse({'stage_names': stages, 'work_package_names': packages})
 
 
 def vendor_options_view(request):

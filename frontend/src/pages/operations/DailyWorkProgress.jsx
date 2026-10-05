@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { HardHat, Loader2, FolderKanban, TrendingUp, MapPin, Building2, ListChecks } from 'lucide-react'
+import { HardHat, Loader2, FolderKanban, TrendingUp, MapPin, Building2, ListChecks, CalendarRange } from 'lucide-react'
 import api from '../../services/api'
 
 const num = (v) => Number(v || 0)
@@ -28,12 +28,13 @@ function Stat({ icon: Icon, label, value }) {
 export default function DailyWorkProgress() {
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState('')
-  const [hasBuild, setHasBuild] = useState(null)
+  const [build, setBuild] = useState(null)
   const [entries, setEntries] = useState([])
   const [vendors, setVendors] = useState([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
   const [filterVendor, setFilterVendor] = useState('')
+  const hasBuild = build === null ? null : !!build
 
   useEffect(() => {
     api.get('/projects/').then(res => setProjects(res.data.projects || [])).catch(() => setProjects([]))
@@ -41,17 +42,37 @@ export default function DailyWorkProgress() {
   }, [])
 
   useEffect(() => {
-    if (!projectId) { setEntries([]); setHasBuild(null); return }
+    if (!projectId) { setEntries([]); setBuild(null); return }
     setLoading(true); setErr('')
     api.get(`/solar/projects/${projectId}/build/`)
-      .then(res => setHasBuild(!!res.data.build))
-      .catch(() => setHasBuild(false))
+      .then(res => setBuild(res.data.build || false))
+      .catch(() => setBuild(false))
     const q = filterVendor ? `?vendor_id=${filterVendor}` : ''
     api.get(`/solar/projects/${projectId}/progress/${q}`)
       .then(res => setEntries(res.data.entries || []))
       .catch(() => setErr('Could not load progress.'))
       .finally(() => setLoading(false))
   }, [projectId, filterVendor])
+
+  // --- Schedule / milestones: map each WBS stage to its field progress ---
+  const stageOf = {} // work_package_id -> stage_id (for entries that only carry a package)
+  if (build && build.stages) {
+    for (const s of build.stages) for (const w of (s.work_packages || [])) stageOf[w.id] = s.id
+  }
+  const stageAgg = {} // stage_id -> {sum,count}
+  for (const e of entries) {
+    const sid = e.stage_id || stageOf[e.work_package_id]
+    if (!sid) continue
+    const a = stageAgg[sid] || (stageAgg[sid] = { sum: 0, count: 0 })
+    a.sum += num(e.progress_percent); a.count += 1
+  }
+  const schedule = (build && build.stages ? build.stages : []).map(s => ({
+    id: s.id, code: s.code, name: s.name, status: s.status,
+    planned_start: s.planned_start, planned_end: s.planned_end,
+    actual_start: s.actual_start, actual_end: s.actual_end,
+    progress: stageAgg[s.id] ? stageAgg[s.id].sum / stageAgg[s.id].count : 0,
+    updates: stageAgg[s.id] ? stageAgg[s.id].count : 0,
+  }))
 
   // --- Analysis (read-only, computed from field-submitted entries) ---
   const latestBySite = {}
@@ -114,6 +135,48 @@ export default function DailyWorkProgress() {
             <Stat icon={MapPin} label="Sites reporting" value={sites.length} />
             <Stat icon={Building2} label="Vendors active" value={vendorRows.length} />
             <Stat icon={ListChecks} label="Updates logged" value={entries.length} />
+          </div>
+
+          {/* Schedule / milestones — WBS stages in order with planned vs actual dates + live progress */}
+          <div className="card overflow-hidden">
+            <div className="flex items-center gap-2 px-4 py-2.5 bg-surface-50 border-b border-surface-200">
+              <CalendarRange size={15} className="text-brand-600" />
+              <h4 className="font-semibold text-slate-800 text-sm">Schedule &amp; milestones</h4>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-slate-400 border-b border-surface-100">
+                    <th className="text-left font-medium px-4 py-2">Stage</th>
+                    <th className="text-left font-medium px-2 py-2">Planned</th>
+                    <th className="text-left font-medium px-2 py-2">Actual</th>
+                    <th className="text-left font-medium px-2 py-2">Status</th>
+                    <th className="text-left font-medium px-2 py-2 w-40">Progress</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {schedule.length === 0 && <tr><td colSpan={5} className="px-4 py-6 text-center text-slate-400">No stages defined.</td></tr>}
+                  {schedule.map(s => (
+                    <tr key={s.id} className="border-b border-surface-50 last:border-0">
+                      <td className="px-4 py-2">
+                        <span className="text-xs font-bold text-brand-600 bg-brand-50 border border-brand-100 rounded px-1.5 py-0.5 mr-2">{s.code}</span>
+                        <span className="text-slate-700">{s.name}</span>
+                      </td>
+                      <td className="px-2 py-2 text-xs text-slate-500">{s.planned_start || '—'} → {s.planned_end || '—'}</td>
+                      <td className="px-2 py-2 text-xs text-slate-500">{s.actual_start || '—'} → {s.actual_end || '—'}</td>
+                      <td className="px-2 py-2"><span className="badge badge-blue">{(s.status || 'pending').replace('_', ' ')}</span></td>
+                      <td className="px-2 py-2">
+                        <div className="flex items-center gap-2">
+                          <Bar value={s.progress} />
+                          <span className="w-9 text-right font-semibold text-slate-800 text-xs">{pct(s.progress)}</span>
+                        </div>
+                        {s.updates > 0 && <span className="text-[10px] text-slate-400">{s.updates} update{s.updates !== 1 ? 's' : ''}</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">

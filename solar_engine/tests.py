@@ -165,6 +165,73 @@ class DailyProgressTests(TestCase):
 import json  # noqa: E402
 
 
+class WbsEditingTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='pm_edit', password='x', is_superuser=True)
+        self.client.force_login(self.user)
+        self.project = ProjectMaster.objects.create(project_name='Edit', total_mw=Decimal('5'))
+        self.build = services.instantiate_build(self.project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+
+    def test_add_rename_delete_stage(self):
+        r = self.client.post(reverse('solar-stage-create', kwargs={'build_id': self.build.id}),
+                             data=json.dumps({'name': 'Custom Stage'}), content_type='application/json')
+        self.assertEqual(r.status_code, 201)
+        sid = r.json()['stage']['id']
+        r = self.client.patch(reverse('solar-stage', kwargs={'stage_id': sid}),
+                              data=json.dumps({'name': 'Renamed Stage'}), content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['stage']['name'], 'Renamed Stage')
+        r = self.client.delete(reverse('solar-stage', kwargs={'stage_id': sid}))
+        self.assertEqual(r.status_code, 200)
+
+    def test_add_and_move_work_package(self):
+        stages = list(self.build.stages.all())
+        s1, s2 = stages[0], stages[1]
+        r = self.client.post(reverse('solar-stage-wp-create', kwargs={'stage_id': s1.id}),
+                             data=json.dumps({'name': 'Custom WP'}), content_type='application/json')
+        self.assertEqual(r.status_code, 201)
+        wid = r.json()['work_package']['id']
+        # move it to another stage
+        r = self.client.patch(reverse('solar-workpackage', kwargs={'wp_id': wid}),
+                              data=json.dumps({'stage_id': s2.id}), content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        from solar_engine.models import ProjectWorkPackage
+        self.assertEqual(ProjectWorkPackage.objects.get(pk=wid).stage_id, s2.id)
+
+    def test_reorder_stages(self):
+        ids = list(self.build.stages.values_list('id', flat=True))
+        reversed_ids = list(reversed(ids))
+        r = self.client.post(reverse('solar-wbs-reorder', kwargs={'build_id': self.build.id}),
+                             data=json.dumps({'stages': reversed_ids}), content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        new_first = self.build.stages.order_by('order', 'id').first().id
+        self.assertEqual(new_first, reversed_ids[0])
+
+    def test_library_lists_options(self):
+        r = self.client.get(reverse('solar-wbs-library'))
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(len(r.json()['work_package_names']) > 0)
+
+    def test_locked_build_blocks_editing(self):
+        services.lock_build(self.build, self.user)
+        r = self.client.post(reverse('solar-stage-create', kwargs={'build_id': self.build.id}),
+                             data=json.dumps({'name': 'Nope'}), content_type='application/json')
+        self.assertEqual(r.status_code, 400)
+
+    def test_unlock_reenables_editing(self):
+        services.lock_build(self.build, self.user)
+        r = self.client.post(reverse('solar-build-unlock', kwargs={'build_id': self.build.id}))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['build']['status'], 'draft')
+        r = self.client.post(reverse('solar-stage-create', kwargs={'build_id': self.build.id}),
+                             data=json.dumps({'name': 'Now allowed'}), content_type='application/json')
+        self.assertEqual(r.status_code, 201)
+
+
 class AuthTests(TestCase):
     @classmethod
     def setUpTestData(cls):

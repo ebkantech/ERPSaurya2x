@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
   Sun, Zap, Loader2, Lock, CheckCircle2, LayoutList, Table2, Gauge,
-  AlertTriangle, ArrowLeft, Sparkles, FileText, HardHat, Plus,
+  AlertTriangle, ArrowLeft, Sparkles, FileText, HardHat, Plus, Trash2, Unlock,
 } from 'lucide-react'
 import api from '../../services/api'
 
@@ -137,28 +137,109 @@ function MilestoneDates({ stage, onStageDates }) {
   )
 }
 
-function WbsTab({ stages, editable, vendors, onWpStatus, onWpVendor, onStageDates }) {
+// Inline-editable text: shows text, becomes an input on click; saves on blur/Enter.
+function EditableText({ value, onSave, editable, className = '', placeholder = '' }) {
+  const [editing, setEditing] = useState(false)
+  const [v, setV] = useState(value)
+  useEffect(() => { setV(value) }, [value])
+  if (!editable) return <span className={className}>{value || placeholder}</span>
+  if (!editing) {
+    return (
+      <span className={`${className} cursor-text hover:bg-surface-50 rounded px-1 -mx-1`} title="Click to edit"
+        onClick={() => setEditing(true)}>{value || <span className="text-slate-300">{placeholder}</span>}</span>
+    )
+  }
+  const commit = () => { setEditing(false); if (v.trim() && v !== value) onSave(v.trim()) }
+  return (
+    <input autoFocus value={v} onChange={e => setV(e.target.value)} onBlur={commit}
+      onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setV(value); setEditing(false) } }}
+      className={`${className} border border-brand-300 rounded px-1 outline-none focus:ring-1 focus:ring-brand-500`} />
+  )
+}
+
+function WbsTab({
+  stages, editable, vendors, library,
+  onWpStatus, onWpVendor, onStageDates,
+  onAddStage, onRenameStage, onDeleteStage, onReorderStages,
+  onAddWp, onRenameWp, onDeleteWp, onMoveWp, onReorderWps,
+}) {
+  const [newStage, setNewStage] = useState('')
+  const [addWpFor, setAddWpFor] = useState(null) // stage id with open "add package" input
+  const [newWp, setNewWp] = useState('')
+  const [dragWp, setDragWp] = useState(null)      // {wpId, fromStageId}
+  const [dragStage, setDragStage] = useState(null)
+
+  const submitStage = (e) => { e.preventDefault(); if (newStage.trim()) { onAddStage(newStage.trim()); setNewStage('') } }
+  const submitWp = (e, stageId) => {
+    e.preventDefault()
+    if (newWp.trim()) { onAddWp(stageId, newWp.trim()); setNewWp(''); setAddWpFor(null) }
+  }
+
   return (
     <div className="space-y-3">
+      {editable && (
+        <div className="flex items-center gap-2 text-xs text-slate-500 bg-brand-50 border border-brand-100 rounded-lg px-3 py-2">
+          <Sparkles size={13} className="text-brand-600" />
+          Edit mode — click a title to rename, add/remove stages &amp; packages, and drag to reorder. Lock the build to freeze.
+        </div>
+      )}
+
       {stages.map(stage => (
-        <div key={stage.id} className="card p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
+        <div key={stage.id}
+          draggable={editable}
+          onDragStart={() => editable && setDragStage(stage.id)}
+          onDragOver={e => { if (editable && dragStage) e.preventDefault() }}
+          onDrop={() => {
+            if (!editable || dragStage == null || dragStage === stage.id) return
+            const ids = stages.map(s => s.id).filter(id => id !== dragStage)
+            const at = ids.indexOf(stage.id)
+            ids.splice(at, 0, dragStage)
+            onReorderStages(ids); setDragStage(null)
+          }}
+          className="card p-4">
+          <div className="flex items-center justify-between mb-3 gap-2">
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              {editable && <span className="text-slate-300 cursor-grab select-none" title="Drag to reorder stage">⠿</span>}
               <span className="text-xs font-bold text-brand-600 bg-brand-50 border border-brand-100 rounded px-2 py-0.5">{stage.code}</span>
-              <h4 className="font-semibold text-slate-800 text-sm">{stage.name}</h4>
+              <EditableText value={stage.name} editable={editable} className="font-semibold text-slate-800 text-sm"
+                onSave={(name) => onRenameStage(stage.id, name)} />
               {stage.is_parallel && <span className="badge badge-amber">parallel</span>}
             </div>
-            <span className="text-xs text-slate-400">{stage.work_packages.length} packages</span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400">{stage.work_packages.length} pkg</span>
+              {editable && (
+                <button onClick={() => onDeleteStage(stage.id)} title="Delete stage"
+                  className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button>
+              )}
+            </div>
           </div>
 
-          {/* Milestones: planned/actual dates for this stage */}
           <MilestoneDates stage={stage} onStageDates={onStageDates} />
 
           <div className="divide-y divide-surface-100">
             {stage.work_packages.map(wp => (
-              <div key={wp.id} className="flex items-center justify-between gap-3 py-2 flex-wrap">
-                <span className="text-sm text-slate-600 flex-1 min-w-[180px]">{wp.name}</span>
-                {/* Work allocation: vendor responsible */}
+              <div key={wp.id}
+                draggable={editable}
+                onDragStart={e => { if (editable) { e.stopPropagation(); setDragWp({ wpId: wp.id, fromStageId: stage.id }) } }}
+                onDragOver={e => { if (editable && dragWp) { e.preventDefault(); e.stopPropagation() } }}
+                onDrop={e => {
+                  if (!editable || !dragWp) return
+                  e.stopPropagation()
+                  if (dragWp.fromStageId === stage.id) {
+                    const ids = stage.work_packages.map(w => w.id).filter(id => id !== dragWp.wpId)
+                    const at = ids.indexOf(wp.id); ids.splice(at, 0, dragWp.wpId)
+                    onReorderWps(stage.id, ids)
+                  } else {
+                    onMoveWp(dragWp.wpId, dragWp.fromStageId, stage.id)
+                  }
+                  setDragWp(null)
+                }}
+                className="flex items-center justify-between gap-3 py-2 flex-wrap">
+                <div className="flex items-center gap-2 flex-1 min-w-[180px]">
+                  {editable && <span className="text-slate-300 cursor-grab select-none" title="Drag to reorder / move">⠿</span>}
+                  <EditableText value={wp.name} editable={editable} className="text-sm text-slate-600"
+                    onSave={(name) => onRenameWp(wp.id, name)} />
+                </div>
                 <select value={wp.assigned_vendor_id || ''}
                   onChange={e => onWpVendor(stage.id, wp.id, e.target.value)}
                   className="text-xs border border-surface-200 rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-brand-500 max-w-[200px]">
@@ -170,11 +251,45 @@ function WbsTab({ stages, editable, vendors, onWpStatus, onWpVendor, onStageDate
                   className="text-xs border border-surface-200 rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-brand-500">
                   {STATUS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
+                {editable && (
+                  <button onClick={() => onDeleteWp(stage.id, wp.id)} title="Remove package"
+                    className="text-slate-300 hover:text-red-500"><Trash2 size={13} /></button>
+                )}
               </div>
             ))}
           </div>
+
+          {editable && (
+            addWpFor === stage.id ? (
+              <form onSubmit={e => submitWp(e, stage.id)} className="flex items-center gap-2 mt-2">
+                <input autoFocus list="wbs-wp-library" value={newWp} onChange={e => setNewWp(e.target.value)}
+                  placeholder="Pick from library or type a package…"
+                  className="flex-1 text-sm border border-surface-200 rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-brand-500" />
+                <button type="submit" className="btn-primary !py-1 !text-xs"><Plus size={12} />Add</button>
+                <button type="button" onClick={() => { setAddWpFor(null); setNewWp('') }} className="text-xs text-slate-400">Cancel</button>
+              </form>
+            ) : (
+              <button onClick={() => { setAddWpFor(stage.id); setNewWp('') }}
+                className="mt-2 text-xs text-brand-600 font-medium flex items-center gap-1 hover:text-brand-700">
+                <Plus size={12} />Add work package
+              </button>
+            )
+          )}
         </div>
       ))}
+
+      {editable && (
+        <form onSubmit={submitStage} className="card p-3 flex items-center gap-2">
+          <input list="wbs-stage-library" value={newStage} onChange={e => setNewStage(e.target.value)}
+            placeholder="Add a stage (pick from library or type a custom one)…"
+            className="flex-1 text-sm border border-surface-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-brand-500" />
+          <button type="submit" className="btn-primary"><Plus size={14} />Add stage</button>
+        </form>
+      )}
+
+      {/* Library options for the pickers */}
+      <datalist id="wbs-stage-library">{(library.stage_names || []).map(n => <option key={n} value={n} />)}</datalist>
+      <datalist id="wbs-wp-library">{(library.work_package_names || []).map(n => <option key={n} value={n} />)}</datalist>
     </div>
   )
 }
@@ -432,6 +547,7 @@ export default function ProjectWorkStructure() {
   const [locking, setLocking] = useState(false)
   const [notice, setNotice] = useState('')
   const [vendors, setVendors] = useState([])
+  const [library, setLibrary] = useState({ stage_names: [], work_package_names: [] })
 
   const load = async () => {
     setLoading(true); setError('')
@@ -453,7 +569,52 @@ export default function ProjectWorkStructure() {
     api.get('/solar/vendor-options/')
       .then(res => setVendors(res.data.vendors || []))
       .catch(() => setVendors([]))
+    api.get('/solar/wbs-library/')
+      .then(res => setLibrary(res.data || { stage_names: [], work_package_names: [] }))
+      .catch(() => {})
   }, [])
+
+  // Re-fetch the whole build after a structural edit (add/delete/reorder/move).
+  const refreshBuild = async () => {
+    const res = await api.get(`/solar/projects/${projectId}/build/`)
+    setBuild(res.data.build)
+  }
+
+  // --- Work-breakdown editing (draft only) ---
+  const addStage = async (name) => {
+    await api.post(`/solar/builds/${build.id}/stages/`, { name }); await refreshBuild()
+  }
+  const renameStage = async (stageId, name) => {
+    await api.patch(`/solar/stages/${stageId}/`, { name })
+    setBuild(b => ({ ...b, stages: b.stages.map(s => s.id === stageId ? { ...s, name } : s) }))
+  }
+  const deleteStage = async (stageId) => {
+    if (!window.confirm('Remove this stage and its work packages?')) return
+    await api.delete(`/solar/stages/${stageId}/`); await refreshBuild()
+  }
+  const reorderStages = async (ids) => {
+    setBuild(b => ({ ...b, stages: ids.map(id => b.stages.find(s => s.id === id)).filter(Boolean) }))
+    await api.post(`/solar/builds/${build.id}/reorder/`, { stages: ids })
+  }
+  const addWp = async (stageId, name) => {
+    await api.post(`/solar/stages/${stageId}/workpackages/`, { name }); await refreshBuild()
+  }
+  const renameWp = async (wpId, name) => {
+    await api.patch(`/solar/workpackages/${wpId}/`, { name }); await refreshBuild()
+  }
+  const deleteWp = async (stageId, wpId) => {
+    await api.delete(`/solar/workpackages/${wpId}/`)
+    setBuild(b => ({ ...b, stages: b.stages.map(s => s.id !== stageId ? s : {
+      ...s, work_packages: s.work_packages.filter(w => w.id !== wpId) }) }))
+  }
+  const moveWp = async (wpId, fromStageId, toStageId) => {
+    await api.patch(`/solar/workpackages/${wpId}/`, { stage_id: toStageId }); await refreshBuild()
+  }
+  const reorderWps = async (stageId, ids) => {
+    setBuild(b => ({ ...b, stages: b.stages.map(s => s.id !== stageId ? s : {
+      ...s, work_packages: ids.map(id => s.work_packages.find(w => w.id === id)).filter(Boolean) }) }))
+    await api.post(`/solar/builds/${build.id}/reorder/`, { stage_id: stageId, work_packages: ids })
+  }
 
   const setWpVendor = async (stageId, wpId, vendorId) => {
     const res = await api.patch(`/solar/workpackages/${wpId}/`, { assigned_vendor_id: vendorId || '' })
@@ -491,11 +652,22 @@ export default function ProjectWorkStructure() {
   const lock = async () => {
     setLocking(true); setNotice('')
     try {
-      const res = await api.post(`/solar/builds/${build.id}/lock/`)
-      setNotice(`Locked. Procurement quotation ${res.data.quotation_number || ''} drafted.`)
+      await api.post(`/solar/builds/${build.id}/lock/`)
+      setNotice('Build locked. The work breakdown is now read-only — unlock to edit.')
       await load()
     } catch (err) {
       setNotice(err.response?.data?.error || 'Could not lock the build.')
+    } finally { setLocking(false) }
+  }
+
+  const unlock = async () => {
+    setLocking(true); setNotice('')
+    try {
+      await api.post(`/solar/builds/${build.id}/unlock/`)
+      setNotice('Build unlocked. You can edit the work breakdown again.')
+      await load()
+    } catch (err) {
+      setNotice(err.response?.data?.error || 'Could not unlock the build.')
     } finally { setLocking(false) }
   }
 
@@ -516,13 +688,14 @@ export default function ProjectWorkStructure() {
             <span className={`badge ${build.status === 'draft' ? 'badge-blue' : 'badge-green'}`}>
               {build.status_display} · {build.progress_percent}%
             </span>
-            {build.is_editable && (
+            {build.is_editable ? (
               <button onClick={lock} disabled={locking} className="btn-primary">
-                {locking ? <Loader2 size={14} className="animate-spin" /> : <Lock size={14} />}Lock & Draft Quotation
+                {locking ? <Loader2 size={14} className="animate-spin" /> : <Lock size={14} />}Lock
               </button>
-            )}
-            {build.generated_quotation_id && (
-              <Link to={`/materials/quotations/${build.generated_quotation_id}`} className="btn-secondary"><FileText size={14} />Quotation</Link>
+            ) : (
+              <button onClick={unlock} disabled={locking} className="btn-secondary">
+                {locking ? <Loader2 size={14} className="animate-spin" /> : <Unlock size={14} />}Unlock to edit
+              </button>
             )}
           </div>
         )}
@@ -559,7 +732,12 @@ export default function ProjectWorkStructure() {
           )}
 
           {tab === 'sizing' && <SizingTab sizing={build.sizing} />}
-          {tab === 'wbs' && <WbsTab stages={build.stages || []} editable={build.is_editable} vendors={vendors} onWpStatus={setWpStatus} onWpVendor={setWpVendor} onStageDates={setStageDates} />}
+          {tab === 'wbs' && <WbsTab
+            stages={build.stages || []} editable={build.is_editable} vendors={vendors} library={library}
+            onWpStatus={setWpStatus} onWpVendor={setWpVendor} onStageDates={setStageDates}
+            onAddStage={addStage} onRenameStage={renameStage} onDeleteStage={deleteStage} onReorderStages={reorderStages}
+            onAddWp={addWp} onRenameWp={renameWp} onDeleteWp={deleteWp} onMoveWp={moveWp} onReorderWps={reorderWps}
+          />}
           {tab === 'boq' && <BoqTab sections={build.boq_sections || []} editable={build.is_editable} onItemSave={saveItem} />}
 
           <p className="text-xs text-slate-400 italic pt-2">

@@ -233,3 +233,19 @@ def lock_build(build, user):
 
     quotation = generate_quotation_from_boq(build, user=user)
     return build, quotation
+
+
+@transaction.atomic
+def unlock_build(build, user):
+    """Re-open a locked build for editing (back to draft). Restricted to
+    super admin / admin / project manager. The already-drafted quotation is
+    left intact."""
+    if not can_lock_build(user):
+        raise PermissionDenied('Only an admin or project manager can unlock a build.')
+    if build.status == C.BUILD_DRAFT:
+        return build
+    build.status = C.BUILD_DRAFT
+    build.locked_by = None
+    build.locked_at = None
+    build.save(update_fields=['status', 'locked_by', 'locked_at', 'updated_at'])
+    return build
