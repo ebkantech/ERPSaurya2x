@@ -70,7 +70,7 @@ export default function Sidebar() {
           <Zap size={15} className="text-white" />
         </div>
         <div>
-          <p className="font-bold text-white text-sm tracking-wide leading-none">OmegaERP</p>
+          <p className="font-bold text-white text-sm tracking-wide leading-none">Saurya2x</p>
           <p className="text-xs text-brand-400 mt-0.5">Enterprise Suite</p>
         </div>
       </div>

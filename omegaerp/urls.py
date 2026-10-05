@@ -17,6 +17,11 @@ from core.views import (
     save_project_distribution,
     project_list_api,
     project_options_api,
+    project_site_create_api,
+    project_site_list_api,
+    project_site_options_api,
+    site_assessment_update_api,
+    site_detail_api,
     register_vendor,
     resend_vendor_registration_link,
     update_vendor,
@@ -111,6 +116,12 @@ urlpatterns = [
     path('api/projects/options/', project_options_api, name='api-project-options'),
     path('api/projects/master/create/', create_project_master, name='api-project-master-create'),
     path('api/projects/distribution/save/', save_project_distribution, name='api-project-distribution-save'),
+    # Project sites & pre-execution assessment
+    path('api/projects/<int:project_id>/sites/', project_site_list_api, name='api-project-site-list'),
+    path('api/projects/<int:project_id>/sites/options/', project_site_options_api, name='api-project-site-options'),
+    path('api/projects/<int:project_id>/sites/create/', project_site_create_api, name='api-project-site-create'),
+    path('api/sites/<int:site_id>/', site_detail_api, name='api-site-detail'),
+    path('api/site-assessments/<int:assessment_id>/update/', site_assessment_update_api, name='api-site-assessment-update'),
     path('api/vendors/', vendor_list_api, name='api-vendor-list'),
     path('api/vendors/register/', register_vendor, name='api-vendor-register'),
     path('api/vendors/<str:vendor_id>/update/', update_vendor, name='api-vendor-update'),
@@ -195,6 +206,10 @@ urlpatterns = [
     re_path(r'^projects/?$', _react_index),
     re_path(r'^projects/new/?$', _react_index),
     re_path(r'^projects/solar-tracker/?$', _react_index),
+    # Site registry & assessment live under a project, so they need an explicit
+    # allow here — the catch-all below excludes the whole 'projects/' prefix.
+    re_path(r'^projects/[0-9]+/sites/?$', _react_index),
+    re_path(r'^projects/[0-9]+/sites/(new|[0-9]+)/?$', _react_index),
     # DEAD — see comment above; core.urls still claims 'materials/'.
     re_path(r'^materials/?$', _react_index),
     re_path(r'^materials/quotations/?$', _react_index),

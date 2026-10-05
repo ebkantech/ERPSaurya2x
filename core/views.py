@@ -27,7 +27,9 @@ from .models import (
     MaterialQuotation,
     ProjectMaster,
     ProjectPlanner,
+    ProjectSite,
     ProjectWorkAllocation,
+    SiteAssessment,
     Vendor,
     WorkPackage,
 )
@@ -1200,3 +1202,286 @@ def media_blob_proxy(request, blob_path):
 def sign_out(request):
     logout(request)
     return redirect('/admin/login/')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Project sites & pre-execution assessment
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _serialize_assessment_rows(site):
+    rows = []
+    for item in site.assessments.order_by('display_order', 'id'):
+        rows.append({
+            'id': item.id,
+            'document_key': item.document_key,
+            'label': item.label,
+            'hint': item.hint,
+            'is_mandatory': item.is_mandatory,
+            'file_name': item.file_name or '',
+            'signed_by': item.signed_by or '',
+            'signed_on': item.signed_on.isoformat() if item.signed_on else '',
+            'verified_by': item.verified_by or '',
+            'verified_on': item.verified_on.isoformat() if item.verified_on else '',
+            'status': item.status,
+            'remark': item.remark or '',
+        })
+    return rows
+
+
+def _serialize_site_rows(queryset):
+    rows = []
+    for site in queryset:
+        location = ', '.join([p for p in [site.village, site.district, site.state] if p])
+        rows.append({
+            'id': site.id,
+            'project_id': site.project_id,
+            'site_code': site.site_code or '',
+            'site_name': site.site_name or '',
+            'capacity_mw': '' if site.capacity_mw is None else str(site.capacity_mw),
+            'land_area_acres': '' if site.land_area_acres is None else str(site.land_area_acres),
+            'mounting_type': site.mounting_type or '',
+            'location': location,
+            'village': site.village or '',
+            'tehsil': site.tehsil or '',
+            'district': site.district or '',
+            'state': site.state or '',
+            'latitude': '' if site.latitude is None else str(site.latitude),
+            'longitude': '' if site.longitude is None else str(site.longitude),
+            'khasra_numbers': site.khasra_numbers or '',
+            'land_title': site.land_title or '',
+            'land_title_display': site.get_land_title_display() if site.land_title else '',
+            'owner_name': site.owner_name or '',
+            'tenure_years': site.tenure_years or '',
+            'status': site.status,
+            'note': site.note or '',
+            'mandatory_total': site.mandatory_total,
+            'mandatory_cleared': site.mandatory_cleared,
+            'created_at': site.created_at.strftime('%d %b %Y') if site.created_at else '',
+        })
+    return rows
+
+
+def _project_site_summary(project):
+    """Capacity roll-up plus the execution gate for one project."""
+    sites = project.sites.all()
+    allocated = sum((s.capacity_mw or Decimal('0')) for s in sites)
+    sanctioned = project.total_mw or Decimal('0')
+    cleared_sites = [s for s in sites if s.is_cleared]
+    cleared_mw = sum((s.capacity_mw or Decimal('0')) for s in cleared_sites)
+    pending_docs = SiteAssessment.objects.filter(
+        site__project=project, is_mandatory=True
+    ).exclude(status=SiteAssessment.STATUS_CLEARED).count()
+    return {
+        'site_count': len(sites),
+        'allocated_mw': str(allocated),
+        'sanctioned_mw': str(sanctioned),
+        'remaining_mw': str(sanctioned - allocated),
+        'capacity_balanced': bool(sanctioned) and allocated == sanctioned,
+        'capacity_exceeded': allocated > sanctioned,
+        'cleared_sites': len(cleared_sites),
+        'cleared_mw': str(cleared_mw),
+        'pending_documents': pending_docs,
+        'execution_unlocked': bool(sites) and len(cleared_sites) == len(sites),
+    }
+
+
+@login_required(login_url='/admin/login/')
+def project_site_list_api(request, project_id):
+    """GET → every site on a project, with the capacity roll-up and gate."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    try:
+        project = ProjectMaster.objects.get(id=project_id)
+    except ProjectMaster.DoesNotExist:
+        return JsonResponse({'error': 'Project not found'}, status=404)
+
+    sites = project.sites.all().order_by('site_code')
+    return JsonResponse({
+        'project': {
+            'id': project.id,
+            'project_code': project.project_code or '',
+            'project_name': project.project_name or '',
+            'client_name': project.client_name or '',
+            'total_mw': '' if project.total_mw is None else str(project.total_mw),
+        },
+        'sites': _serialize_site_rows(sites),
+        'summary': _project_site_summary(project),
+    })
+
+
+@login_required(login_url='/admin/login/')
+def project_site_options_api(request, project_id):
+    """GET → the next free site number plus dropdown options for the form."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    try:
+        project = ProjectMaster.objects.get(id=project_id)
+    except ProjectMaster.DoesNotExist:
+        return JsonResponse({'error': 'Project not found'}, status=404)
+
+    last = ProjectSite.objects.order_by('-id').first()
+    next_number = (last.id + 1) if last else 1
+    return JsonResponse({
+        'next_site_code': f"{ProjectSite.SITE_PREFIX}-{str(next_number).zfill(3)}",
+        'land_titles': [{'value': v, 'label': l} for v, l in ProjectSite.LAND_TITLE_CHOICES],
+        'mounting_types': [{'value': v, 'label': l} for v, l in ProjectSite.MOUNTING_CHOICES],
+        'summary': _project_site_summary(project),
+    })
+
+
+@login_required(login_url='/admin/login/')
+def project_site_create_api(request, project_id):
+    """POST → register a site and seed its assessment file."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    try:
+        project = ProjectMaster.objects.get(id=project_id)
+    except ProjectMaster.DoesNotExist:
+        return JsonResponse({'error': 'Project not found'}, status=404)
+    try:
+        payload = json.loads(request.body.decode('utf-8') or '{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON payload'}, status=400)
+
+    site_name = (payload.get('siteName') or '').strip()
+    capacity_mw = _to_decimal_or_none(payload.get('capacityMw'))
+    land_title = (payload.get('landTitle') or '').strip()
+    allow_overflow = bool(payload.get('allowOverflow'))
+
+    errors = []
+    if not site_name:
+        errors.append('siteName is required')
+    if capacity_mw is None or capacity_mw <= 0:
+        errors.append('capacityMw must be greater than zero')
+    if land_title and land_title not in dict(ProjectSite.LAND_TITLE_CHOICES):
+        errors.append('landTitle is invalid')
+
+    # Capacity guard: the sum of site capacities may not exceed the sanctioned
+    # figure unless the caller explicitly overrides it.
+    if capacity_mw is not None and not errors:
+        summary = _project_site_summary(project)
+        allocated = Decimal(summary['allocated_mw'])
+        sanctioned = Decimal(summary['sanctioned_mw'])
+        if sanctioned and (allocated + capacity_mw) > sanctioned and not allow_overflow:
+            errors.append(
+                f"Capacity would exceed the sanctioned {sanctioned} MW "
+                f"({allocated} MW already allocated). Raise a variation order "
+                f"or reduce another site."
+            )
+    if errors:
+        return JsonResponse({'error': errors}, status=400)
+
+    with transaction.atomic():
+        site = ProjectSite.objects.create(
+            project=project,
+            site_name=site_name,
+            capacity_mw=capacity_mw,
+            land_area_acres=_to_decimal_or_none(payload.get('landAreaAcres')),
+            mounting_type=(payload.get('mountingType') or '').strip(),
+            village=(payload.get('village') or '').strip(),
+            tehsil=(payload.get('tehsil') or '').strip(),
+            district=(payload.get('district') or '').strip(),
+            state=(payload.get('state') or '').strip(),
+            latitude=_to_decimal_or_none(payload.get('latitude')),
+            longitude=_to_decimal_or_none(payload.get('longitude')),
+            khasra_numbers=(payload.get('khasraNumbers') or '').strip(),
+            land_title=land_title,
+            owner_name=(payload.get('ownerName') or '').strip(),
+            tenure_years=_to_int_or_none(payload.get('tenureYears')),
+            note=(payload.get('note') or '').strip(),
+        )
+
+    return JsonResponse({
+        'message': f'Site {site.site_code} registered successfully',
+        'site': _serialize_site_rows([site])[0],
+        'summary': _project_site_summary(project),
+    })
+
+
+@login_required(login_url='/admin/login/')
+def site_detail_api(request, site_id):
+    """GET → one site plus its full assessment file."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    try:
+        site = ProjectSite.objects.select_related('project').get(id=site_id)
+    except ProjectSite.DoesNotExist:
+        return JsonResponse({'error': 'Site not found'}, status=404)
+
+    return JsonResponse({
+        'site': _serialize_site_rows([site])[0],
+        'project': {
+            'id': site.project_id,
+            'project_code': site.project.project_code or '',
+            'project_name': site.project.project_name or '',
+        },
+        'assessments': _serialize_assessment_rows(site),
+    })
+
+
+@login_required(login_url='/admin/login/')
+def site_assessment_update_api(request, assessment_id):
+    """POST → record an upload, a signature or a verification on one document.
+
+    The site's own status is recalculated from its mandatory rows afterwards,
+    so the execution gate is never set by hand.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    try:
+        item = SiteAssessment.objects.select_related('site').get(id=assessment_id)
+    except SiteAssessment.DoesNotExist:
+        return JsonResponse({'error': 'Assessment row not found'}, status=404)
+    try:
+        payload = json.loads(request.body.decode('utf-8') or '{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON payload'}, status=400)
+
+    status = (payload.get('status') or '').strip()
+    if status and status not in dict(SiteAssessment.STATUS_CHOICES):
+        return JsonResponse({'error': 'status is invalid'}, status=400)
+
+    def parse_date(raw):
+        raw = (raw or '').strip()
+        if not raw:
+            return None
+        try:
+            return datetime.datetime.strptime(raw, '%Y-%m-%d').date()
+        except ValueError:
+            return None
+
+    if 'fileName' in payload:
+        item.file_name = (payload.get('fileName') or '').strip()
+    if 'signedBy' in payload:
+        item.signed_by = (payload.get('signedBy') or '').strip()
+    if 'signedOn' in payload:
+        item.signed_on = parse_date(payload.get('signedOn'))
+    if 'verifiedBy' in payload:
+        item.verified_by = (payload.get('verifiedBy') or '').strip()
+    if 'verifiedOn' in payload:
+        item.verified_on = parse_date(payload.get('verifiedOn'))
+    if 'remark' in payload:
+        item.remark = (payload.get('remark') or '').strip()
+
+    if status:
+        item.status = status
+    elif item.file_name and item.status == SiteAssessment.STATUS_PENDING:
+        item.status = SiteAssessment.STATUS_UPLOADED
+
+    # Clearing a row needs both a signatory and an internal verifier on record.
+    if item.status == SiteAssessment.STATUS_CLEARED and not (item.signed_by and item.verified_by):
+        return JsonResponse(
+            {'error': 'A document can only be cleared once it has both a signatory and a verifier'},
+            status=400,
+        )
+
+    item.save()
+    site = item.site
+    site.recalculate_status()
+
+    return JsonResponse({
+        'message': 'Assessment updated',
+        'assessment': [r for r in _serialize_assessment_rows(site) if r['id'] == item.id][0],
+        'site': _serialize_site_rows([site])[0],
+        'summary': _project_site_summary(site.project),
+    })

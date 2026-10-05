@@ -141,7 +141,7 @@ export default function AssistantPage() {
   const [messages, setMessages] = useState([
     {
       id: 0, role: 'bot',
-      text: "Hello! I'm your OmegaERP AI Assistant. I can search across materials, vendors, purchase orders, payments, and projects using semantic and keyword search. What would you like to know?",
+      text: "Hello! I'm your Saurya2x AI Assistant. I can search across materials, vendors, purchase orders, payments, and projects using semantic and keyword search. What would you like to know?",
       intent: null, results: [],
     },
   ])
@@ -210,7 +210,7 @@ export default function AssistantPage() {
               <Sparkles size={18} className="text-brand-300" />
             </div>
             <div>
-              <p className="font-bold text-white text-sm leading-none">OmegaERP Assistant</p>
+              <p className="font-bold text-white text-sm leading-none">Saurya2x Assistant</p>
               <div className="flex items-center gap-1.5 mt-1">
                 <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
                 <p className="text-xs text-brand-300">AI + Semantic Search</p>

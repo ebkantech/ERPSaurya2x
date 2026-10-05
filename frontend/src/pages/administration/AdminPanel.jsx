@@ -147,7 +147,7 @@ function EmailTab() {
           { l:'SMTP Port',     v:'587',            type:'number'   },
           { l:'Username',      v:'erp@omega.com',  type:'email'    },
           { l:'Password',      v:'••••••••••',     type:'password' },
-          { l:'From Name',     v:'OmegaERP System',type:'text', full:true },
+          { l:'From Name',     v:'Saurya2x System',type:'text', full:true },
           { l:'Reply-To',      v:'noreply@omega.com', type:'email', full:true },
         ].map(f => (
           <div key={f.l} className={f.full ? 'md:col-span-2' : ''}>

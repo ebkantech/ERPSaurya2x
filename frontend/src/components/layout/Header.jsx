@@ -62,7 +62,7 @@ export default function Header() {
       <div className="flex-1 min-w-0">
         <h1 className="text-sm font-bold text-slate-900 truncate">{pageTitle}</h1>
         <p className="text-xs text-slate-400 truncate">
-          OmegaERP{crumbs.length > 1 ? ' / ' + crumbs.join(' / ') : ''}
+          Saurya2x{crumbs.length > 1 ? ' / ' + crumbs.join(' / ') : ''}
         </p>
       </div>
 

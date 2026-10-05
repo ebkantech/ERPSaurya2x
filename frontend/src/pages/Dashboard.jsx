@@ -553,7 +553,7 @@ export default function Dashboard() {
               <div className="w-11 h-11 bg-white/10 rounded-2xl flex items-center justify-center mb-4 border border-white/10">
                 <Sparkles size={22} className="text-brand-300" />
               </div>
-              <h3 className="font-bold text-white text-base mb-1.5">OmegaERP Assistant</h3>
+              <h3 className="font-bold text-white text-base mb-1.5">Saurya2x Assistant</h3>
               <p className="text-brand-300 text-xs leading-relaxed mb-4">
                 AI-powered semantic search across vendors, POs, site data, materials, and project status.
               </p>

@@ -127,6 +127,14 @@ export default function ProjectList() {
                 </div>
                 <span className="text-slate-400">{p.client_name || ''}</span>
               </div>
+
+              <Link
+                to={`/projects/${p.id}/sites`}
+                className="mt-3 flex items-center justify-between w-full text-xs font-semibold text-brand-600 hover:text-brand-700 bg-brand-50 border border-brand-100 rounded-lg px-3 py-2 transition-colors hover:bg-brand-100"
+              >
+                Sites &amp; assessment
+                <ChevronRight size={13} />
+              </Link>
             </div>
           ))}
         </div>

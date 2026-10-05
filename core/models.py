@@ -195,3 +195,196 @@ class ProjectPlanner(models.Model):
 
     class Meta:
         db_table = 'project_planner'
+
+
+class ProjectSite(models.Model):
+    """One physical site inside a project.
+
+    Capacity is held per site; the project's total_mw is the sanctioned figure
+    those sites are checked against. A site cannot be released for execution
+    until every mandatory row in its assessment is cleared.
+    """
+
+    SITE_PREFIX = 'SITE'
+
+    LAND_TITLE_CHOICES = [
+        ('allotment', 'Allotment letter · site owner'),
+        ('lease', 'Registered lease deed'),
+        ('freehold', 'Freehold · owned'),
+        ('government', 'Government allotment'),
+    ]
+    MOUNTING_CHOICES = [
+        ('ground_fixed', 'Ground mount · fixed tilt'),
+        ('ground_tracker', 'Ground mount · single axis'),
+        ('rooftop', 'Rooftop'),
+        ('floating', 'Floating'),
+    ]
+    STATUS_NOT_STARTED = 'not_started'
+    STATUS_IN_REVIEW = 'in_review'
+    STATUS_CLEARED = 'cleared'
+    STATUS_CHOICES = [
+        (STATUS_NOT_STARTED, 'Not started'),
+        (STATUS_IN_REVIEW, 'In review'),
+        (STATUS_CLEARED, 'Cleared'),
+    ]
+
+    project = models.ForeignKey(ProjectMaster, on_delete=models.CASCADE, related_name='sites')
+    site_code = models.CharField(max_length=50, unique=True, blank=True)
+    site_name = models.CharField(max_length=255)
+    capacity_mw = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    land_area_acres = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    mounting_type = models.CharField(max_length=30, choices=MOUNTING_CHOICES, blank=True)
+
+    village = models.CharField(max_length=150, blank=True)
+    tehsil = models.CharField(max_length=150, blank=True)
+    district = models.CharField(max_length=150, blank=True)
+    state = models.CharField(max_length=100, blank=True)
+    latitude = models.DecimalField(max_digits=10, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=10, decimal_places=6, null=True, blank=True)
+    khasra_numbers = models.CharField(max_length=255, blank=True)
+
+    land_title = models.CharField(max_length=30, choices=LAND_TITLE_CHOICES, blank=True)
+    owner_name = models.CharField(max_length=255, blank=True)
+    tenure_years = models.PositiveIntegerField(null=True, blank=True)
+
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_NOT_STARTED)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        creating = self.pk is None
+        super().save(*args, **kwargs)
+        if creating:
+            if not self.site_code:
+                self.site_code = f"{self.SITE_PREFIX}-{str(self.pk).zfill(3)}"
+                super().save(update_fields=['site_code'])
+            self.seed_assessment()
+
+    def seed_assessment(self):
+        """Create the standard assessment file the first time a site is saved."""
+        if self.assessments.exists():
+            return
+        # bulk_create skips save(), so is_mandatory is set explicitly here.
+        SiteAssessment.objects.bulk_create([
+            SiteAssessment(
+                site=self,
+                document_key=key,
+                is_mandatory=mandatory,
+                display_order=order,
+            )
+            for order, (key, _label, mandatory, _hint) in enumerate(SiteAssessment.DOCUMENT_SPEC)
+        ])
+
+    @property
+    def mandatory_total(self):
+        return self.assessments.filter(is_mandatory=True).count()
+
+    @property
+    def mandatory_cleared(self):
+        return self.assessments.filter(
+            is_mandatory=True, status=SiteAssessment.STATUS_CLEARED
+        ).count()
+
+    def recalculate_status(self, commit=True):
+        """Roll the document rows up into the site's own status."""
+        total = self.mandatory_total
+        cleared = self.mandatory_cleared
+        if total and cleared >= total:
+            new_status = self.STATUS_CLEARED
+        elif cleared or self.assessments.exclude(status=SiteAssessment.STATUS_PENDING).exists():
+            new_status = self.STATUS_IN_REVIEW
+        else:
+            new_status = self.STATUS_NOT_STARTED
+        if new_status != self.status:
+            self.status = new_status
+            if commit:
+                super().save(update_fields=['status'])
+        return self.status
+
+    @property
+    def is_cleared(self):
+        return self.status == self.STATUS_CLEARED
+
+    def __str__(self):
+        return f"{self.site_name} ({self.site_code})"
+
+    class Meta:
+        db_table = 'project_site'
+        ordering = ['site_code']
+
+
+class SiteAssessment(models.Model):
+    """One required document in a site's pre-execution assessment."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_UPLOADED = 'uploaded'
+    STATUS_CLEARED = 'cleared'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_UPLOADED, 'Awaiting sign-off'),
+        (STATUS_CLEARED, 'Cleared'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    # key, label, is_mandatory, hint
+    DOCUMENT_SPEC = [
+        ('site_clearance', 'Site Clearance Report', True,
+         'Signed by the client'),
+        ('land_title', 'Allotment Letter / Lease Deed', True,
+         'Allotment letter from the owner, or a registered lease'),
+        ('revenue_record', 'Revenue Record / Khasra', True,
+         'Current year extract'),
+        ('topography', 'Topography & Shading Survey', True,
+         'Feeds the yield model'),
+        ('grid_connectivity', 'Grid Connectivity Confirmation', True,
+         'Feeder availability and evacuation point'),
+        ('approach_road', 'Approach Road & Access', True,
+         'Right of way for heavy vehicles'),
+        ('geotech', 'Soil / Geotech Report', False,
+         'Foundation design input'),
+        ('water_source', 'Water Source Availability', False,
+         'For module cleaning'),
+    ]
+    SPEC_BY_KEY = {key: (label, mandatory, hint) for key, label, mandatory, hint in DOCUMENT_SPEC}
+
+    site = models.ForeignKey(ProjectSite, on_delete=models.CASCADE, related_name='assessments')
+    document_key = models.CharField(max_length=50)
+    is_mandatory = models.BooleanField(default=True)
+    display_order = models.PositiveIntegerField(default=0)
+
+    document_file = models.FileField(upload_to='site_assessment/', blank=True, null=True)
+    file_name = models.CharField(max_length=255, blank=True)
+
+    signed_by = models.CharField(max_length=255, blank=True)
+    signed_on = models.DateField(null=True, blank=True)
+    verified_by = models.CharField(max_length=255, blank=True)
+    verified_on = models.DateField(null=True, blank=True)
+
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    remark = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        spec = self.SPEC_BY_KEY.get(self.document_key)
+        if spec and self.pk is None:
+            self.is_mandatory = spec[1]
+        super().save(*args, **kwargs)
+
+    @property
+    def label(self):
+        spec = self.SPEC_BY_KEY.get(self.document_key)
+        return spec[0] if spec else self.document_key
+
+    @property
+    def hint(self):
+        spec = self.SPEC_BY_KEY.get(self.document_key)
+        return spec[2] if spec else ''
+
+    def __str__(self):
+        return f"{self.site.site_code} · {self.label}"
+
+    class Meta:
+        db_table = 'site_assessment'
+        ordering = ['display_order', 'id']
+        unique_together = [('site', 'document_key')]

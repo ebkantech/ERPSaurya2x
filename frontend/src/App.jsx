@@ -18,6 +18,9 @@ import PaymentList   from './pages/payments/PaymentList'
 import ProjectList   from './pages/projects/ProjectList'
 import ProjectCreate from './pages/projects/ProjectCreate'
 import SolarSiteTracker from './pages/projects/SolarSiteTracker'
+import ProjectSites   from './pages/projects/ProjectSites'
+import SiteCreate     from './pages/projects/SiteCreate'
+import SiteAssessment from './pages/projects/SiteAssessment'
 import MaterialList  from './pages/materials/MaterialList'
 import QuotationList   from './pages/materials/QuotationList'
 import QuotationBuilder from './pages/materials/QuotationBuilder'
@@ -81,6 +84,9 @@ export default function App() {
             <Route path="projects"               element={<ProjectList />}   />
             <Route path="projects/new"           element={<ProjectCreate />} />
             <Route path="projects/solar-tracker" element={<SolarSiteTracker />} />
+            <Route path="projects/:projectId/sites"          element={<ProjectSites />}   />
+            <Route path="projects/:projectId/sites/new"      element={<SiteCreate />}     />
+            <Route path="projects/:projectId/sites/:siteId"  element={<SiteAssessment />} />
             <Route path="materials"              element={<MaterialList />}  />
             <Route path="materials/quotations"     element={<QuotationList />}    />
             <Route path="materials/quotations/new" element={<QuotationBuilder />} />

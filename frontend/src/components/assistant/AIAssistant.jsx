@@ -70,7 +70,7 @@ export default function AIAssistant() {
     {
       id: 0,
       role: 'bot',
-      text: "Hello! I'm your OmegaERP assistant. Ask me about materials, vendors, purchase orders, payments, or projects.",
+      text: "Hello! I'm your Saurya2x assistant. Ask me about materials, vendors, purchase orders, payments, or projects.",
       intent: null,
       results: [],
     },
@@ -146,7 +146,7 @@ export default function AIAssistant() {
                 <Sparkles size={16} className="text-brand-300" />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-bold text-white leading-none">OmegaERP Assistant</p>
+                <p className="text-sm font-bold text-white leading-none">Saurya2x Assistant</p>
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
                   <p className="text-xs text-brand-300">Semantic search · AI-powered</p>

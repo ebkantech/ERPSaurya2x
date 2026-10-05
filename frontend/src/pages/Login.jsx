@@ -43,7 +43,7 @@ export default function Login() {
             <Zap size={20} className="text-white" />
           </div>
           <div>
-            <p className="font-bold text-white text-lg leading-none">OmegaERP</p>
+            <p className="font-bold text-white text-lg leading-none">Saurya2x</p>
             <p className="text-xs text-brand-300 mt-0.5">Enterprise Resource Planning</p>
           </div>
         </div>
@@ -92,7 +92,7 @@ export default function Login() {
             <div className="w-9 h-9 bg-brand-500 rounded-xl flex items-center justify-center">
               <Zap size={18} className="text-white" />
             </div>
-            <span className="font-bold text-slate-900 text-lg">OmegaERP</span>
+            <span className="font-bold text-slate-900 text-lg">Saurya2x</span>
           </div>
 
           <div className="mb-8">
