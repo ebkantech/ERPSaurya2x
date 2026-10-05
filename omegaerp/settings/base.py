@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'documents',
     'reports',
     'search',
+    'solar_engine',
 ]
 
 MIDDLEWARE = [
