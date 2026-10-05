@@ -95,6 +95,76 @@ class LockAndQuotationTests(TestCase):
             services.lock_build(build, staff)
 
 
+class AllocationAndMilestoneTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+
+    def test_assign_vendor_and_dates(self):
+        from core.models import Vendor
+        project = ProjectMaster.objects.create(project_name='Alloc', total_mw=Decimal('5'))
+        build = services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        wp = build.stages.first().work_packages.first()
+        vendor = Vendor.objects.create(company_name='Acme EPC')
+        wp.assigned_vendor = vendor
+        wp.save()
+        wp.refresh_from_db()
+        self.assertEqual(wp.assigned_vendor_id, vendor.id)
+
+        stage = build.stages.first()
+        stage.planned_start = '2026-01-01'
+        stage.actual_end = '2026-03-15'
+        stage.save()
+        stage.refresh_from_db()
+        self.assertEqual(str(stage.planned_start), '2026-01-01')
+
+
+class DailyProgressTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+
+    def test_field_ingest_requires_token(self):
+        from core.models import Vendor
+        project = ProjectMaster.objects.create(project_name='Prog', project_code='PRJ900', total_mw=Decimal('5'))
+        services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        url = reverse('solar-field-ingest')
+        # No token configured by default -> 503
+        resp = self.client.post(url, data={'project_code': 'PRJ900', 'site_name': 'S1'})
+        self.assertIn(resp.status_code, (503, 401))
+
+    def test_field_ingest_with_token_creates_entry(self):
+        project = ProjectMaster.objects.create(project_name='Prog2', project_code='PRJ901', total_mw=Decimal('5'))
+        services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        url = reverse('solar-field-ingest')
+        with self.settings(FIELD_INGEST_TOKEN='secret-123'):
+            resp = self.client.post(
+                url,
+                data=json.dumps({'project_code': 'PRJ901', 'site_name': 'Pokaran', 'progress_percent': '40', 'reporter_name': 'Site Eng'}),
+                content_type='application/json',
+                HTTP_X_FIELD_TOKEN='secret-123',
+            )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()['entry']['site_name'], 'Pokaran')
+
+    def test_field_ingest_rejects_bad_token(self):
+        project = ProjectMaster.objects.create(project_name='Prog3', project_code='PRJ902', total_mw=Decimal('5'))
+        services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        url = reverse('solar-field-ingest')
+        with self.settings(FIELD_INGEST_TOKEN='secret-123'):
+            resp = self.client.post(url, data=json.dumps({'project_code': 'PRJ902', 'site_name': 'X'}),
+                                    content_type='application/json', HTTP_X_FIELD_TOKEN='wrong')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_progress_tab_requires_login(self):
+        project = ProjectMaster.objects.create(project_name='Prog4', total_mw=Decimal('5'))
+        resp = self.client.get(reverse('solar-project-progress', kwargs={'project_id': project.id}))
+        self.assertIn(resp.status_code, (302, 401, 403))
+
+
+import json  # noqa: E402
+
+
 class AuthTests(TestCase):
     @classmethod
     def setUpTestData(cls):

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
   Sun, Zap, Loader2, Lock, CheckCircle2, LayoutList, Table2, Gauge,
-  AlertTriangle, ArrowLeft, Sparkles, FileText,
+  AlertTriangle, ArrowLeft, Sparkles, FileText, HardHat, Plus,
 } from 'lucide-react'
 import api from '../../services/api'
 
@@ -113,7 +113,31 @@ function SizingTab({ sizing }) {
   )
 }
 
-function WbsTab({ stages, editable, onWpStatus }) {
+function MilestoneDates({ stage, onStageDates }) {
+  const [d, setD] = useState({
+    planned_start: stage.planned_start || '', planned_end: stage.planned_end || '',
+    actual_start: stage.actual_start || '', actual_end: stage.actual_end || '',
+  })
+  const save = (field) => {
+    if (d[field] === (stage[field] || '')) return
+    onStageDates(stage.id, { [field]: d[field] })
+  }
+  const input = 'text-xs border border-surface-200 rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-brand-500'
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 bg-surface-50 rounded-lg p-2.5">
+      {[['planned_start', 'Planned start'], ['planned_end', 'Planned end'],
+        ['actual_start', 'Actual start'], ['actual_end', 'Actual end']].map(([f, label]) => (
+        <label key={f} className="flex flex-col gap-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</span>
+          <input type="date" className={input} value={d[f]}
+            onChange={e => setD(s => ({ ...s, [f]: e.target.value }))} onBlur={() => save(f)} />
+        </label>
+      ))}
+    </div>
+  )
+}
+
+function WbsTab({ stages, editable, vendors, onWpStatus, onWpVendor, onStageDates }) {
   return (
     <div className="space-y-3">
       {stages.map(stage => (
@@ -126,11 +150,22 @@ function WbsTab({ stages, editable, onWpStatus }) {
             </div>
             <span className="text-xs text-slate-400">{stage.work_packages.length} packages</span>
           </div>
+
+          {/* Milestones: planned/actual dates for this stage */}
+          <MilestoneDates stage={stage} onStageDates={onStageDates} />
+
           <div className="divide-y divide-surface-100">
             {stage.work_packages.map(wp => (
-              <div key={wp.id} className="flex items-center justify-between py-2">
-                <span className="text-sm text-slate-600">{wp.name}</span>
-                <select value={wp.status} disabled={!editable && false}
+              <div key={wp.id} className="flex items-center justify-between gap-3 py-2 flex-wrap">
+                <span className="text-sm text-slate-600 flex-1 min-w-[180px]">{wp.name}</span>
+                {/* Work allocation: vendor responsible */}
+                <select value={wp.assigned_vendor_id || ''}
+                  onChange={e => onWpVendor(stage.id, wp.id, e.target.value)}
+                  className="text-xs border border-surface-200 rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-brand-500 max-w-[200px]">
+                  <option value="">Unassigned</option>
+                  {vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </select>
+                <select value={wp.status}
                   onChange={e => onWpStatus(stage.id, wp.id, e.target.value)}
                   className="text-xs border border-surface-200 rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-brand-500">
                   {STATUS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -221,6 +256,172 @@ function BoqRow({ item, editable, onSave }) {
   )
 }
 
+function DailyProgressTab({ projectId, build, vendors }) {
+  const [entries, setEntries] = useState([])
+  const [sites, setSites] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+  const [filterVendor, setFilterVendor] = useState('')
+  const [form, setForm] = useState({
+    site_name: '', progress_date: new Date().toISOString().slice(0, 10),
+    stage_id: '', work_package_id: '', vendor_id: '',
+    progress_percent: '', status: 'in_progress', note: '',
+  })
+
+  const allWps = (build.stages || []).flatMap(s => s.work_packages.map(w => ({ ...w, stage_id: s.id, stage_name: s.name })))
+
+  const load = () => {
+    setLoading(true)
+    const q = filterVendor ? `?vendor_id=${filterVendor}` : ''
+    api.get(`/solar/projects/${projectId}/progress/${q}`)
+      .then(res => { setEntries(res.data.entries || []); setSites(res.data.sites || []) })
+      .catch(() => setErr('Could not load progress.'))
+      .finally(() => setLoading(false))
+  }
+  useEffect(() => { load() }, [projectId, filterVendor])
+
+  const submit = async (e) => {
+    e.preventDefault(); setSaving(true); setErr('')
+    try {
+      const body = { ...form }
+      // derive vendor from the selected work package if not set
+      if (!body.vendor_id && body.work_package_id) {
+        const wp = allWps.find(w => String(w.id) === String(body.work_package_id))
+        if (wp?.assigned_vendor_id) body.vendor_id = wp.assigned_vendor_id
+      }
+      await api.post(`/solar/projects/${projectId}/progress/`, body)
+      setForm(f => ({ ...f, progress_percent: '', note: '' }))
+      load()
+    } catch (e2) {
+      setErr(e2.response?.data?.error || 'Could not save progress.')
+    } finally { setSaving(false) }
+  }
+
+  const wpOptions = form.stage_id
+    ? allWps.filter(w => String(w.stage_id) === String(form.stage_id))
+    : allWps
+  const inp = 'w-full border border-surface-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-brand-500'
+
+  return (
+    <div className="space-y-5">
+      {/* Entry form — same fields the field portal submits */}
+      <form onSubmit={submit} className="card p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <HardHat size={16} className="text-brand-600" />
+          <h4 className="font-semibold text-slate-800 text-sm">Log daily progress</h4>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold text-slate-500">Site</span>
+            <input className={inp} list="site-list" value={form.site_name} required
+              onChange={e => setForm(f => ({ ...f, site_name: e.target.value }))} placeholder="e.g. Pokaran" />
+            <datalist id="site-list">{sites.map(s => <option key={s} value={s} />)}</datalist>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold text-slate-500">Date</span>
+            <input type="date" className={inp} value={form.progress_date} required
+              onChange={e => setForm(f => ({ ...f, progress_date: e.target.value }))} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold text-slate-500">Work stage</span>
+            <select className={inp} value={form.stage_id}
+              onChange={e => setForm(f => ({ ...f, stage_id: e.target.value, work_package_id: '' }))}>
+              <option value="">All stages</option>
+              {(build.stages || []).map(s => <option key={s.id} value={s.id}>{s.code} — {s.name}</option>)}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold text-slate-500">Work scope (package)</span>
+            <select className={inp} value={form.work_package_id}
+              onChange={e => setForm(f => ({ ...f, work_package_id: e.target.value }))}>
+              <option value="">—</option>
+              {wpOptions.map(w => <option key={w.id} value={w.id}>{w.name}{w.assigned_vendor_name ? ` · ${w.assigned_vendor_name}` : ''}</option>)}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold text-slate-500">Vendor</span>
+            <select className={inp} value={form.vendor_id}
+              onChange={e => setForm(f => ({ ...f, vendor_id: e.target.value }))}>
+              <option value="">From work scope</option>
+              {vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold text-slate-500">Progress %</span>
+            <input type="number" min="0" max="100" step="0.1" className={inp} value={form.progress_percent}
+              onChange={e => setForm(f => ({ ...f, progress_percent: e.target.value }))} placeholder="0–100" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold text-slate-500">Status</span>
+            <select className={inp} value={form.status}
+              onChange={e => setForm(f => ({ ...f, status: e.target.value }))}>
+              {STATUS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 md:col-span-1 col-span-2">
+            <span className="text-[11px] font-semibold text-slate-500">Note</span>
+            <input className={inp} value={form.note}
+              onChange={e => setForm(f => ({ ...f, note: e.target.value }))} placeholder="Optional" />
+          </label>
+        </div>
+        {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-3 py-2 mt-3">{err}</div>}
+        <div className="mt-3">
+          <button type="submit" disabled={saving} className="btn-primary">
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}Record progress
+          </button>
+        </div>
+      </form>
+
+      {/* Filter + log */}
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-slate-500">Filter by vendor:</span>
+        <select className="text-xs border border-surface-200 rounded-md px-2 py-1" value={filterVendor}
+          onChange={e => setFilterVendor(e.target.value)}>
+          <option value="">All vendors</option>
+          {vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+        </select>
+        <span className="text-xs text-slate-400 ml-auto">{entries.length} entries</span>
+      </div>
+
+      <div className="card overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-slate-400 border-b border-surface-100">
+                <th className="text-left font-medium px-4 py-2">Date</th>
+                <th className="text-left font-medium px-2 py-2">Site</th>
+                <th className="text-left font-medium px-2 py-2">Work scope</th>
+                <th className="text-left font-medium px-2 py-2">Vendor</th>
+                <th className="text-right font-medium px-2 py-2">%</th>
+                <th className="text-left font-medium px-2 py-2">Status</th>
+                <th className="text-left font-medium px-2 py-2">Note</th>
+                <th className="text-left font-medium px-4 py-2">By</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-400"><Loader2 size={14} className="animate-spin inline" /> Loading…</td></tr>}
+              {!loading && entries.length === 0 && <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-400">No progress logged yet.</td></tr>}
+              {!loading && entries.map(e => (
+                <tr key={e.id} className="border-b border-surface-50 last:border-0">
+                  <td className="px-4 py-2 text-slate-600">{e.progress_date}</td>
+                  <td className="px-2 py-2 font-medium text-slate-800">{e.site_name}</td>
+                  <td className="px-2 py-2 text-slate-600">{e.work_package_name || e.stage_name || '—'}</td>
+                  <td className="px-2 py-2 text-slate-600">{e.vendor_name || '—'}</td>
+                  <td className="px-2 py-2 text-right font-semibold text-slate-800">{e.progress_percent}%</td>
+                  <td className="px-2 py-2"><span className="badge badge-blue">{e.status.replace('_', ' ')}</span></td>
+                  <td className="px-2 py-2 text-slate-500">{e.note}</td>
+                  <td className="px-4 py-2 text-slate-400 text-xs">{e.reporter_name || '—'}{e.source === 'field' ? ' 📱' : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ProjectWorkStructure() {
   const { projectId } = useParams()
   const [build, setBuild] = useState(null)
@@ -230,6 +431,7 @@ export default function ProjectWorkStructure() {
   const [tab, setTab] = useState('sizing')
   const [locking, setLocking] = useState(false)
   const [notice, setNotice] = useState('')
+  const [vendors, setVendors] = useState([])
 
   const load = async () => {
     setLoading(true); setError('')
@@ -246,6 +448,29 @@ export default function ProjectWorkStructure() {
     } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [projectId])
+
+  useEffect(() => {
+    api.get('/solar/vendor-options/')
+      .then(res => setVendors(res.data.vendors || []))
+      .catch(() => setVendors([]))
+  }, [])
+
+  const setWpVendor = async (stageId, wpId, vendorId) => {
+    const res = await api.patch(`/solar/workpackages/${wpId}/`, { assigned_vendor_id: vendorId || '' })
+    const updated = res.data.work_package
+    setBuild(b => ({
+      ...b,
+      stages: b.stages.map(s => s.id !== stageId ? s : {
+        ...s, work_packages: s.work_packages.map(w => w.id === wpId ? updated : w),
+      }),
+    }))
+  }
+
+  const setStageDates = async (stageId, patch) => {
+    const res = await api.patch(`/solar/stages/${stageId}/`, patch)
+    const updated = res.data.stage
+    setBuild(b => ({ ...b, stages: b.stages.map(s => s.id === stageId ? updated : s) }))
+  }
 
   const saveItem = async (itemId, body) => {
     await api.patch(`/solar/boq-items/${itemId}/`, body)
@@ -334,7 +559,7 @@ export default function ProjectWorkStructure() {
           )}
 
           {tab === 'sizing' && <SizingTab sizing={build.sizing} />}
-          {tab === 'wbs' && <WbsTab stages={build.stages || []} editable={build.is_editable} onWpStatus={setWpStatus} />}
+          {tab === 'wbs' && <WbsTab stages={build.stages || []} editable={build.is_editable} vendors={vendors} onWpStatus={setWpStatus} onWpVendor={setWpVendor} onStageDates={setStageDates} />}
           {tab === 'boq' && <BoqTab sections={build.boq_sections || []} editable={build.is_editable} onItemSave={saveItem} />}
 
           <p className="text-xs text-slate-400 italic pt-2">

@@ -29,6 +29,7 @@ const navGroups = [
     label: 'Operations',
     items: [
       { label: 'Projects',         icon: FolderKanban, path: '/projects' },
+      { label: 'Daily Work Progress', icon: ClipboardList, path: '/operations/daily-progress' },
       { label: 'Materials',        icon: Package,      path: '/materials' },
       { label: 'Quotations', icon: PackageSearch, path: '/materials/quotations' },
       { label: 'Transport',        icon: ArrowLeftRight, path: '/transport' },

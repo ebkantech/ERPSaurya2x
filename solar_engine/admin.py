@@ -93,3 +93,13 @@ admin.site.register(ProjectSizing)
 admin.site.register(ProjectStage)
 admin.site.register(ProjectWorkPackage)
 admin.site.register(ProjectBoqItem)
+
+
+from .models import SiteProgressEntry  # noqa: E402
+
+
+@admin.register(SiteProgressEntry)
+class SiteProgressEntryAdmin(admin.ModelAdmin):
+    list_display = ('site_name', 'progress_date', 'vendor', 'progress_percent', 'status', 'source', 'build')
+    list_filter = ('source', 'status', 'progress_date')
+    search_fields = ('site_name', 'build__project__project_name')

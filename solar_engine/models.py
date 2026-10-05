@@ -249,6 +249,11 @@ class ProjectWorkPackage(models.Model):
         'core.ProjectWorkAllocation', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='solar_work_packages',
     )
+    # Work allocation: the vendor responsible for this work package.
+    assigned_vendor = models.ForeignKey(
+        'core.Vendor', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='solar_work_packages',
+    )
     notes = models.TextField(blank=True)
     source_wp = models.ForeignKey(WbsWorkPackage, on_delete=models.SET_NULL, null=True, blank=True)
 
@@ -292,3 +297,48 @@ class ProjectBoqItem(models.Model):
     @property
     def total_amount(self):
         return self.material_amount + self.labour_amount
+
+class SiteProgressEntry(models.Model):
+    """A single daily field-progress record: for a project build, on a date,
+    at a named site, against a WBS work package (which carries the vendor
+    scope). Submitted either from the ERP 'Daily Work Progress' tab or from
+    the FieldTracker field portal."""
+
+    SOURCE_WEB = 'web'
+    SOURCE_FIELD = 'field'
+    SOURCE_CHOICES = [(SOURCE_WEB, 'ERP Web'), (SOURCE_FIELD, 'Field Portal')]
+
+    build = models.ForeignKey(ProjectBuild, on_delete=models.CASCADE, related_name='progress_entries')
+    site_name = models.CharField(max_length=200)
+    stage = models.ForeignKey(ProjectStage, on_delete=models.SET_NULL, null=True, blank=True, related_name='progress_entries')
+    work_package = models.ForeignKey(ProjectWorkPackage, on_delete=models.SET_NULL, null=True, blank=True, related_name='progress_entries')
+    vendor = models.ForeignKey('core.Vendor', on_delete=models.SET_NULL, null=True, blank=True, related_name='site_progress_entries')
+
+    progress_date = models.DateField()
+    progress_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0'))
+    quantity = models.DecimalField(max_digits=16, decimal_places=2, null=True, blank=True)
+    unit = models.CharField(max_length=40, blank=True)
+    status = models.CharField(max_length=20, choices=C.EXECUTION_STATUS_CHOICES, default=C.STATUS_IN_PROGRESS)
+    note = models.TextField(blank=True)
+    photo = models.FileField(upload_to='field_progress/', null=True, blank=True)
+
+    reported_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='site_progress_reports',
+    )
+    reporter_name = models.CharField(max_length=150, blank=True)
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default=SOURCE_WEB)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'solar_site_progress_entry'
+        ordering = ['-progress_date', '-created_at', '-id']
+
+    def __str__(self):
+        return f'{self.site_name} @ {self.progress_date} ({self.progress_percent}%)'
+
+    def save(self, *args, **kwargs):
+        # Denormalise the vendor from the work package's allocation when absent.
+        if self.work_package_id and not self.vendor_id:
+            self.vendor_id = self.work_package.assigned_vendor_id
+        super().save(*args, **kwargs)

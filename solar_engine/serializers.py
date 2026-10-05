@@ -16,12 +16,15 @@ def serialize_sizing(sizing):
 
 
 def serialize_work_package(wp):
+    vendor = wp.assigned_vendor
     return {
         'id': wp.id,
         'name': wp.name,
         'discipline': wp.discipline,
         'status': wp.status,
         'allocation_id': wp.allocation_id,
+        'assigned_vendor_id': wp.assigned_vendor_id,
+        'assigned_vendor_name': (vendor.company_name or vendor.vendor_name) if vendor else '',
         'notes': wp.notes,
     }
 
@@ -111,3 +114,26 @@ def serialize_build(build, detail=True):
         data['stages'] = [serialize_stage(s) for s in build.stages.all()]
         data['boq_sections'] = serialize_boq_grouped(build)
     return data
+
+
+def serialize_progress(entry):
+    return {
+        'id': entry.id,
+        'site_name': entry.site_name,
+        'stage_id': entry.stage_id,
+        'stage_name': entry.stage.name if entry.stage_id else '',
+        'work_package_id': entry.work_package_id,
+        'work_package_name': entry.work_package.name if entry.work_package_id else '',
+        'vendor_id': entry.vendor_id,
+        'vendor_name': (entry.vendor.company_name or entry.vendor.vendor_name) if entry.vendor_id else '',
+        'progress_date': entry.progress_date.isoformat() if entry.progress_date else '',
+        'progress_percent': str(entry.progress_percent),
+        'quantity': str(entry.quantity) if entry.quantity is not None else '',
+        'unit': entry.unit,
+        'status': entry.status,
+        'note': entry.note,
+        'photo_url': entry.photo.url if entry.photo else '',
+        'reporter_name': entry.reporter_name or (entry.reported_by.get_username() if entry.reported_by_id else ''),
+        'source': entry.source,
+        'created_at': entry.created_at.isoformat() if entry.created_at else '',
+    }
