@@ -125,7 +125,9 @@ export default function ProjectList() {
                   {p.procurement_source && <span className="capitalize">{p.procurement_source}</span>}
                   {p.created_at && <span className="text-slate-400">· {p.created_at}</span>}
                 </div>
-                <span className="text-slate-400">{p.client_name || ''}</span>
+                <Link to={`/work-structure/${p.id}`} className="flex items-center gap-1 text-brand-600 font-semibold hover:text-brand-700">
+                  <Sun size={12} />Work Structure<ChevronRight size={12} />
+                </Link>
               </div>
 
               <Link

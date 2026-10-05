@@ -1,4 +1,4 @@
-import React from 'react'
+﻿import React from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import Layout from './components/layout/Layout'
@@ -21,6 +21,7 @@ import SolarSiteTracker from './pages/projects/SolarSiteTracker'
 import ProjectSites   from './pages/projects/ProjectSites'
 import SiteCreate     from './pages/projects/SiteCreate'
 import SiteAssessment from './pages/projects/SiteAssessment'
+import ProjectWorkStructure from './pages/projects/ProjectWorkStructure'
 import MaterialList  from './pages/materials/MaterialList'
 import QuotationList   from './pages/materials/QuotationList'
 import QuotationBuilder from './pages/materials/QuotationBuilder'
@@ -87,6 +88,7 @@ export default function App() {
             <Route path="projects/:projectId/sites"          element={<ProjectSites />}   />
             <Route path="projects/:projectId/sites/new"      element={<SiteCreate />}     />
             <Route path="projects/:projectId/sites/:siteId"  element={<SiteAssessment />} />
+            <Route path="work-structure/:projectId" element={<ProjectWorkStructure />} />
             <Route path="materials"              element={<MaterialList />}  />
             <Route path="materials/quotations"     element={<QuotationList />}    />
             <Route path="materials/quotations/new" element={<QuotationBuilder />} />
