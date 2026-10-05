@@ -331,3 +331,5 @@ Before production launch:
 
 - `vercel.json` was intentionally not added because Vercel is not the recommended primary deployment target for this backend-heavy Django application.
 - Local user-uploaded files under `media/` were left in place but are excluded from Git.
+#   E R P S a u r y a 2 x  
+ 
