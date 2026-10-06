@@ -180,21 +180,6 @@ class MaterialQuotation(models.Model):
         db_table = 'material_quotation'
 
 
-class ProjectPlanner(models.Model):
-    business_unit = models.CharField(max_length=255, blank=True)
-    project_name = models.CharField(max_length=255, blank=True)
-    client_name = models.CharField(max_length=255, blank=True)
-    procurement_source = models.CharField(max_length=100, blank=True)
-    project_location = models.CharField(max_length=255, blank=True)
-    mw = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
-    lead_vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True)
-    planner_note = models.TextField(blank=True)
-    work_plan_json = models.TextField(blank=True)
-    material_plan_json = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'project_planner'
 
 
 class ProjectSite(models.Model):
@@ -388,3 +373,4 @@ class SiteAssessment(models.Model):
         db_table = 'site_assessment'
         ordering = ['display_order', 'id']
         unique_together = [('site', 'document_key')]
+

@@ -19,8 +19,9 @@ import DeliveryList  from './pages/deliveries/DeliveryList'
 import PaymentList   from './pages/payments/PaymentList'
 import ProjectList   from './pages/projects/ProjectList'
 import ProjectCreate from './pages/projects/ProjectCreate'
-import SolarSiteTracker from './pages/projects/SolarSiteTracker'
 import ProjectWorkStructure from './pages/projects/ProjectWorkStructure'
+import QualityControl from './pages/operations/QualityControl' 
+import BudgetVsActual from './pages/operations/BudgetVsActual'
 import MaterialList  from './pages/materials/MaterialList'
 import QuotationList   from './pages/materials/QuotationList'
 import QuotationBuilder from './pages/materials/QuotationBuilder'
@@ -84,12 +85,13 @@ export default function App() {
             {/* Operations */}
             <Route path="projects"               element={<ProjectList />}   />
             <Route path="projects/new"           element={<ProjectCreate />} />
-            <Route path="projects/solar-tracker" element={<SolarSiteTracker />} />
             <Route path="projects/:projectId/sites"          element={<ProjectSites />}   />
             <Route path="projects/:projectId/sites/new"      element={<SiteCreate />}     />
             <Route path="projects/:projectId/sites/:siteId"  element={<SiteAssessment />} />
             <Route path="work-structure/:projectId" element={<ProjectWorkStructure />} />
             <Route path="operations/daily-progress" element={<DailyWorkProgress />} />
+            <Route path="operations/quality" element={<QualityControl />} />
+            <Route path="operations/budget" element={<BudgetVsActual />} />
             <Route path="materials"              element={<MaterialList />}  />
             <Route path="materials/quotations"     element={<QuotationList />}    />
             <Route path="materials/quotations/new" element={<QuotationBuilder />} />

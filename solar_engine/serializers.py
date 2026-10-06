@@ -180,3 +180,67 @@ def serialize_certificate(cert):
         'document_url': cert.document.url if cert.document else '',
         'remarks': cert.remarks,
     }
+
+
+def serialize_inspection(ins, detail=True):
+    data = {
+        'id': ins.id,
+        'build_id': ins.build_id,
+        'site_name': ins.site_name,
+        'inspection_type': ins.inspection_type,
+        'inspection_type_display': ins.get_inspection_type_display(),
+        'inspection_date': ins.inspection_date.isoformat() if ins.inspection_date else '',
+        'status': ins.status,
+        'status_display': ins.get_status_display(),
+        'stage_id': ins.stage_id,
+        'stage': ins.stage.name if ins.stage_id else '',
+        'work_package_id': ins.work_package_id,
+        'work_package': ins.work_package.name if ins.work_package_id else '',
+        'vendor_id': ins.vendor_id,
+        'vendor_name': (ins.vendor.company_name or ins.vendor.vendor_name) if ins.vendor_id else '',
+        'note': ins.note,
+        'photo_url': ins.photo.url if ins.photo else '',
+        'latitude': str(ins.latitude) if ins.latitude is not None else '',
+        'longitude': str(ins.longitude) if ins.longitude is not None else '',
+        'reporter_name': ins.reporter_name,
+        'source': ins.source,
+        'rollup': ins.result_rollup,
+        'created_at': ins.created_at.isoformat() if ins.created_at else '',
+    }
+    if detail:
+        data['checkpoints'] = [{
+            'id': c.id, 'order': c.order, 'parameter': c.parameter, 'spec': c.spec,
+            'measured': c.measured, 'unit': c.unit, 'result': c.result, 'remark': c.remark,
+        } for c in ins.checkpoints.all()]
+    return data
+
+
+def serialize_punch(p):
+    return {
+        'id': p.id,
+        'code': p.code,
+        'build_id': p.build_id,
+        'site_name': p.site_name,
+        'title': p.title,
+        'description': p.description,
+        'discipline': p.discipline,
+        'discipline_display': p.get_discipline_display(),
+        'severity': p.severity,
+        'severity_display': p.get_severity_display(),
+        'status': p.status,
+        'status_display': p.get_status_display(),
+        'stage_id': p.stage_id,
+        'work_package_id': p.work_package_id,
+        'work_package': p.work_package.name if p.work_package_id else '',
+        'vendor_id': p.vendor_id,
+        'vendor_name': (p.vendor.company_name or p.vendor.vendor_name) if p.vendor_id else '',
+        'raised_on': p.raised_on.isoformat() if p.raised_on else '',
+        'target_date': p.target_date.isoformat() if p.target_date else '',
+        'resolved_on': p.resolved_on.isoformat() if p.resolved_on else '',
+        'photo_url': p.photo.url if p.photo else '',
+        'latitude': str(p.latitude) if p.latitude is not None else '',
+        'longitude': str(p.longitude) if p.longitude is not None else '',
+        'raiser_name': p.raiser_name,
+        'source': p.source,
+        'created_at': p.created_at.isoformat() if p.created_at else '',
+    }

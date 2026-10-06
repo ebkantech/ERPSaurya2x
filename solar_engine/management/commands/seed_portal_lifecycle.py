@@ -44,6 +44,7 @@ class Command(BaseCommand):
         from transport.models import VehicleMovement
 
         today = timezone.now().date()
+        self._today = today
         w = self.stdout.write
 
         # ----- 0. clean any prior seed run -------------------------------
@@ -137,7 +138,7 @@ class Command(BaseCommand):
 
         # ----- 6. purchase orders + items --------------------------------
         po1 = PurchaseOrder.objects.create(
-            po_number='PO-SEED-0001', po_date=today - timedelta(days=70), vendor=vendor,
+            po_number='PO-SEED-0001', po_date=today - timedelta(days=70), vendor=vendor, project=project,
             business_division='solar', project_site_name=SITE_NAME,
             project_location='Pokaran, Rajasthan',
             delivery_address='Pokaran Solar Park, Gate 2, Rajasthan',
@@ -147,7 +148,7 @@ class Command(BaseCommand):
             payment_terms='30% advance, 60% on delivery, 10% retention',
         )
         po2 = PurchaseOrder.objects.create(
-            po_number='PO-SEED-0002', po_date=today - timedelta(days=35), vendor=vendor,
+            po_number='PO-SEED-0002', po_date=today - timedelta(days=35), vendor=vendor, project=project,
             business_division='solar', project_site_name=SITE_NAME,
             project_location='Pokaran, Rajasthan',
             delivery_address='Pokaran Solar Park, Gate 2, Rajasthan',
@@ -289,9 +290,88 @@ class Command(BaseCommand):
         # ----- 12. refresh auto-eligibility against field progress -------
         billing.refresh_milestones(build)
 
+        # ----- 13. QA inspections + punch list --------------------------
+        self._seed_quality(build, vendor, scope, w)
+
+        # ----- 14. budget vs actual (seed demo figures) -----------------
+        self._seed_budget(build, w)
+
         w(self.style.SUCCESS(
             f'\nDone. Log into FieldTracker2x with vendor code "{VENDOR_CODE}". '
             f'ERP project: {PROJECT_CODE} (build #{build.id}).'))
+
+    def _seed_quality(self, build, vendor, scope, w):
+        """Seed a couple of QA inspections (one passed, one failed) and a few
+        punch items against the vendor's work packages."""
+        from solar_engine import quality as _q
+        from solar_engine.models import PunchItem, QualityCheckpoint, QualityInspection
+        wp0 = scope[1] if len(scope) > 1 else scope[0]
+        wp1 = scope[2] if len(scope) > 2 else scope[0]
+        # passed earthing inspection
+        i1 = QualityInspection.objects.create(
+            build=build, stage=wp0.stage, work_package=wp0, vendor=vendor,
+            site_name=SITE_NAME, inspection_type=QualityInspection.TYPE_EARTHING,
+            inspection_date=self._today, reporter_name='Ramesh Choudhary',
+            latitude=SITE_LAT, longitude=SITE_LNG, source=QualityInspection.SOURCE_FIELD)
+        _q.apply_template(i1)
+        for cp in i1.checkpoints.all():
+            cp.measured = '0.6'; cp.result = QualityCheckpoint.RESULT_PASS; cp.save()
+        i1.status = _q.auto_status(i1); i1.save(update_fields=['status'])
+        # failed megger inspection
+        i2 = QualityInspection.objects.create(
+            build=build, stage=wp1.stage, work_package=wp1, vendor=vendor,
+            site_name=SITE_NAME, inspection_type=QualityInspection.TYPE_MEGGER,
+            inspection_date=self._today, reporter_name='Ramesh Choudhary',
+            latitude=SITE_LAT, longitude=SITE_LNG, source=QualityInspection.SOURCE_FIELD)
+        _q.apply_template(i2)
+        for n, cp in enumerate(i2.checkpoints.all()):
+            cp.measured = '0.4' if n == 1 else '250'
+            cp.result = QualityCheckpoint.RESULT_FAIL if n == 1 else QualityCheckpoint.RESULT_PASS
+            cp.save()
+        i2.status = _q.auto_status(i2); i2.save(update_fields=['status'])
+        # punch items
+        PunchItem.objects.create(
+            build=build, stage=wp1.stage, work_package=wp1, vendor=vendor, site_name=SITE_NAME,
+            title='MMS purlin misaligned (Row 12)', description='Purlin out of tolerance, needs re-shimming.',
+            discipline=PunchItem.DISC_MECH, severity=PunchItem.SEV_HIGH, raised_on=self._today,
+            raiser_name='Ramesh Choudhary',
+            latitude=SITE_LAT, longitude=SITE_LNG, source=PunchItem.SOURCE_FIELD)
+        PunchItem.objects.create(
+            build=build, stage=wp0.stage, work_package=wp0, vendor=vendor, site_name=SITE_NAME,
+            title='Earth pit cover missing', description='Safety cover not installed on pit E-7.',
+            discipline=PunchItem.DISC_SAFETY, severity=PunchItem.SEV_MEDIUM, raised_on=self._today,
+            raiser_name='Site EHS', status=PunchItem.STATUS_RESOLVED, resolved_on=self._today,
+            source=PunchItem.SOURCE_FIELD)
+        w('QA seeded (2 inspections: 1 passed / 1 failed · 2 punch items).')
+
+    def _seed_budget(self, build, w):
+        """Seed a ProjectBudget from the BOQ, then set demo budgeted/actual
+        figures per cost head (the BOQ ships zero rates)."""
+        from solar_engine import budget as _bud
+        from solar_engine.models import BudgetLine
+        budget = _bud.ensure_budget(build)
+        _bud.seed_from_boq(budget)
+        # realistic-ish 5 MW ground-mount demo figures (₹), by cost-head keyword
+        plan = {
+            'module': (165000000, 120000000), 'mounting': (22000000, 18000000),
+            'structure': (22000000, 18000000), 'inverter': (28000000, 20000000),
+            'dc': (9000000, 6000000), 'ac': (8000000, 3000000), 'cable': (9000000, 6000000),
+            'transformer': (12000000, 4000000), 'civil': (18000000, 14000000),
+            'earth': (3500000, 2500000), 'survey': (1500000, 1500000),
+            'erection': (12000000, 7000000), 'testing': (2500000, 0), 'bos': (6000000, 2000000),
+        }
+        from decimal import Decimal
+        for line in budget.lines.all():
+            key = line.cost_head.lower()
+            match = next((v for k, v in plan.items() if k in key), None)
+            if match:
+                line.budgeted_amount = Decimal(match[0])
+                line.actual_amount = Decimal(match[1])
+                line.committed_amount = Decimal(match[0])
+                line.save(update_fields=['budgeted_amount', 'actual_amount', 'committed_amount'])
+        budget.status = 'approved'
+        budget.save(update_fields=['status'])
+        w(f'Budget seeded ({budget.lines.count()} cost heads).')
 
     def _seed_cleared_site(self, project, w):
         """Create a cleared ProjectSite (+ cleared mandatory assessments) so the

@@ -130,7 +130,6 @@
                 <a class="module-subnav-link {% if request.path == '/materials/' %}active{% endif %}" href="{% url 'material-module' %}">Overview</a>
                 <a class="module-subnav-link {% if request.path == '/materials/master/' %}active{% endif %}" href="{% url 'material-master' %}">Material List</a>
                 <a class="module-subnav-link {% if request.path == '/materials/quotation/' %}active{% endif %}" href="{% url 'material-quotation' %}">Quotation Generator</a>
-                <a class="module-subnav-link {% if request.path == '/vendors/planner/' %}active{% endif %}" href="{% url 'vendor-planner' %}">Planner Prototype</a>
             </nav>
             {% endif %}
             {% block content %}{% endblock %}

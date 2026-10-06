@@ -26,7 +26,6 @@ from .models import (
     MaterialMaster,
     MaterialQuotation,
     ProjectMaster,
-    ProjectPlanner,
     ProjectSite,
     ProjectWorkAllocation,
     SiteAssessment,
@@ -633,23 +632,6 @@ def vendor_registration(request):
 
 
 @login_required(login_url='/admin/login/')
-def vendor_planner(request):
-    vendors = list(
-        Vendor.objects.order_by('company_name').values('vendor_id', 'company_name', 'vendor_category')
-    )
-    material_rows = _serialize_material_rows(MaterialMaster.objects.order_by('id'))
-    work_packages = _get_work_package_names()
-    context = {
-        'page_title': 'Planner Prototype',
-        'material_module_nav': True,
-        'vendor_options': vendors,
-        'materials': material_rows,
-        'work_packages': work_packages,
-        'planner_count': ProjectPlanner.objects.count(),
-    }
-    return render(request, 'vendor_planner.html', context)
-
-
 @login_required(login_url='/admin/login/')
 def material_module(request):
     material_count = MaterialMaster.objects.count()
@@ -662,7 +644,6 @@ def material_module(request):
         'work_type_count': work_type_count,
         'unit_count': len(unique_units),
         'quotation_count': MaterialQuotation.objects.count(),
-        'planner_count': ProjectPlanner.objects.count(),
     }
     return render(request, 'material_module.html', context)
 

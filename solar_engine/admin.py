@@ -120,3 +120,41 @@ class HandoverCertificateAdmin(admin.ModelAdmin):
     list_display = ('certificate_number', 'build', 'vendor', 'site_name', 'status', 'issued_date')
     list_filter = ('status',)
     search_fields = ('certificate_number', 'site_name', 'build__project__project_name')
+
+
+from .models import QualityInspection, QualityCheckpoint, PunchItem  # noqa: E402
+
+
+class QualityCheckpointInline(admin.TabularInline):
+    model = QualityCheckpoint
+    extra = 0
+
+
+@admin.register(QualityInspection)
+class QualityInspectionAdmin(admin.ModelAdmin):
+    list_display = ('inspection_type', 'site_name', 'inspection_date', 'status', 'vendor', 'source', 'build')
+    list_filter = ('inspection_type', 'status', 'source')
+    search_fields = ('site_name', 'build__project__project_name')
+    inlines = [QualityCheckpointInline]
+
+
+@admin.register(PunchItem)
+class PunchItemAdmin(admin.ModelAdmin):
+    list_display = ('code', 'title', 'discipline', 'severity', 'status', 'site_name', 'vendor', 'raised_on')
+    list_filter = ('status', 'severity', 'discipline', 'source')
+    search_fields = ('code', 'title', 'site_name', 'build__project__project_name')
+
+
+from .models import ProjectBudget, BudgetLine  # noqa: E402
+
+
+class BudgetLineInline(admin.TabularInline):
+    model = BudgetLine
+    extra = 0
+
+
+@admin.register(ProjectBudget)
+class ProjectBudgetAdmin(admin.ModelAdmin):
+    list_display = ('build', 'status', 'currency', 'approved_by')
+    list_filter = ('status',)
+    inlines = [BudgetLineInline]

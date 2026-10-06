@@ -2,11 +2,11 @@ import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import clsx from 'clsx'
-import {
+import { ShieldCheck,
   LayoutDashboard, Building2, ShoppingCart, Truck, CreditCard,
   FolderKanban, Package, BarChart3, Settings, LogOut, Zap,
   ChevronRight, ArrowLeftRight, Bell, ClipboardList, Sparkles, PackageSearch,
-  Users as UsersIcon,
+  Users as UsersIcon, HardHat,Wallet,
 } from 'lucide-react'
 
 const navGroups = [
@@ -30,10 +30,12 @@ const navGroups = [
     items: [
       { label: 'Projects',         icon: FolderKanban, path: '/projects' },
       { label: 'Daily Work Progress', icon: ClipboardList, path: '/operations/daily-progress' },
+      { label: 'Budget vs Actual', icon: Wallet, path: '/operations/budget' },
       { label: 'Materials',        icon: Package,      path: '/materials' },
       { label: 'Quotations', icon: PackageSearch, path: '/materials/quotations' },
       { label: 'Transport',        icon: ArrowLeftRight, path: '/transport' },
       { label: 'Tasks',            icon: ClipboardList, path: '/tasks' },
+      { label: 'Quality & Punch List', icon: ShieldCheck, path: '/operations/quality' }
     ],
   },
   {
@@ -124,3 +126,7 @@ export default function Sidebar() {
     </div>
   )
 }
+
+
+
+
