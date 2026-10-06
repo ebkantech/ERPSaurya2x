@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'documents',
     'reports',
     'search',
+    'solar_engine',
 ]
 
 MIDDLEWARE = [
@@ -150,6 +151,10 @@ EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
 EMAIL_USE_SSL = env.bool('EMAIL_USE_SSL', default=False)
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='webmaster@localhost')
 SERVER_EMAIL = env('SERVER_EMAIL', default=DEFAULT_FROM_EMAIL)
+
+# Shared bearer token the FieldTracker field portal uses to post daily
+# progress into /api/solar/field/ingest/. Leave blank to disable field ingest.
+FIELD_INGEST_TOKEN = env('FIELD_INGEST_TOKEN', default='')
 
 OPENAI_API_KEY = env('OPENAI_API_KEY', default='')
 THIRD_PARTY_API_KEY = env('THIRD_PARTY_API_KEY', default='')

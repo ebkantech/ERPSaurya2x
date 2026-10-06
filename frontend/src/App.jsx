@@ -1,8 +1,10 @@
-import React from 'react'
+﻿import React from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import Layout from './components/layout/Layout'
-
+import ProjectSites     from './pages/projects/ProjectSites'
+import SiteCreate       from './pages/projects/SiteCreate'
+import SiteAssessment   from './pages/projects/SiteAssessment'
 import Login         from './pages/Login'
 import Dashboard     from './pages/Dashboard'
 import VendorList    from './pages/vendors/VendorList'
@@ -18,9 +20,7 @@ import PaymentList   from './pages/payments/PaymentList'
 import ProjectList   from './pages/projects/ProjectList'
 import ProjectCreate from './pages/projects/ProjectCreate'
 import SolarSiteTracker from './pages/projects/SolarSiteTracker'
-import ProjectSites   from './pages/projects/ProjectSites'
-import SiteCreate     from './pages/projects/SiteCreate'
-import SiteAssessment from './pages/projects/SiteAssessment'
+import ProjectWorkStructure from './pages/projects/ProjectWorkStructure'
 import MaterialList  from './pages/materials/MaterialList'
 import QuotationList   from './pages/materials/QuotationList'
 import QuotationBuilder from './pages/materials/QuotationBuilder'
@@ -46,6 +46,7 @@ import VendorQueue            from './pages/vendor-control/VendorQueue'
 import VendorControlDetail    from './pages/vendor-control/VendorControlDetail'
 import TaskCenter             from './pages/vendor-control/TaskCenter'
 import Followups              from './pages/vendor-control/Followups'
+import DailyWorkProgress from './pages/operations/DailyWorkProgress'
 
 function PrivateRoute({ children }) {
   const { isAuthenticated } = useAuth()
@@ -87,6 +88,8 @@ export default function App() {
             <Route path="projects/:projectId/sites"          element={<ProjectSites />}   />
             <Route path="projects/:projectId/sites/new"      element={<SiteCreate />}     />
             <Route path="projects/:projectId/sites/:siteId"  element={<SiteAssessment />} />
+            <Route path="work-structure/:projectId" element={<ProjectWorkStructure />} />
+            <Route path="operations/daily-progress" element={<DailyWorkProgress />} />
             <Route path="materials"              element={<MaterialList />}  />
             <Route path="materials/quotations"     element={<QuotationList />}    />
             <Route path="materials/quotations/new" element={<QuotationBuilder />} />

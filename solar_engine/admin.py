@@ -1,0 +1,122 @@
+from django.contrib import admin
+
+from .models import (
+    BoqSection,
+    BoqTemplate,
+    BoqTemplateItem,
+    ComponentSpecSet,
+    ProjectBoqItem,
+    ProjectBuild,
+    ProjectSizing,
+    ProjectStage,
+    ProjectWorkPackage,
+    WbsStage,
+    WbsTemplate,
+    WbsWorkPackage,
+)
+
+
+@admin.register(ComponentSpecSet)
+class ComponentSpecSetAdmin(admin.ModelAdmin):
+    list_display = ('name', 'is_default', 'is_active', 'module_wp', 'modules_per_string',
+                    'inverter_kw', 'transformer_mva', 'target_dc_ac_ratio')
+    list_filter = ('is_default', 'is_active')
+
+
+class WbsStageInline(admin.TabularInline):
+    model = WbsStage
+    extra = 0
+
+
+class WbsWorkPackageInline(admin.TabularInline):
+    model = WbsWorkPackage
+    extra = 0
+
+
+@admin.register(WbsTemplate)
+class WbsTemplateAdmin(admin.ModelAdmin):
+    list_display = ('name', 'project_type', 'is_default', 'is_active')
+    list_filter = ('project_type', 'is_default', 'is_active')
+    inlines = [WbsStageInline]
+
+
+@admin.register(WbsStage)
+class WbsStageAdmin(admin.ModelAdmin):
+    list_display = ('code', 'name', 'template', 'order', 'is_parallel')
+    list_filter = ('template',)
+    inlines = [WbsWorkPackageInline]
+
+
+class BoqSectionInline(admin.TabularInline):
+    model = BoqSection
+    extra = 0
+
+
+class BoqTemplateItemInline(admin.TabularInline):
+    model = BoqTemplateItem
+    extra = 0
+
+
+@admin.register(BoqTemplate)
+class BoqTemplateAdmin(admin.ModelAdmin):
+    list_display = ('name', 'project_type', 'is_default', 'is_active')
+    list_filter = ('project_type', 'is_default', 'is_active')
+    inlines = [BoqSectionInline]
+
+
+@admin.register(BoqSection)
+class BoqSectionAdmin(admin.ModelAdmin):
+    list_display = ('name', 'template', 'order', 'is_material')
+    list_filter = ('template', 'is_material')
+    inlines = [BoqTemplateItemInline]
+
+
+class ProjectStageInline(admin.TabularInline):
+    model = ProjectStage
+    extra = 0
+
+
+class ProjectBoqItemInline(admin.TabularInline):
+    model = ProjectBoqItem
+    extra = 0
+
+
+@admin.register(ProjectBuild)
+class ProjectBuildAdmin(admin.ModelAdmin):
+    list_display = ('project', 'project_type', 'ac_capacity_mw', 'status', 'locked_at')
+    list_filter = ('project_type', 'status')
+    search_fields = ('project__project_name', 'project__project_code')
+    inlines = [ProjectStageInline, ProjectBoqItemInline]
+
+
+admin.site.register(ProjectSizing)
+admin.site.register(ProjectStage)
+admin.site.register(ProjectWorkPackage)
+admin.site.register(ProjectBoqItem)
+
+
+from .models import SiteProgressEntry  # noqa: E402
+
+
+@admin.register(SiteProgressEntry)
+class SiteProgressEntryAdmin(admin.ModelAdmin):
+    list_display = ('site_name', 'progress_date', 'vendor', 'progress_percent', 'status', 'source', 'build')
+    list_filter = ('source', 'status', 'progress_date')
+    search_fields = ('site_name', 'build__project__project_name')
+
+
+from .models import BillingMilestone, HandoverCertificate  # noqa: E402
+
+
+@admin.register(BillingMilestone)
+class BillingMilestoneAdmin(admin.ModelAdmin):
+    list_display = ('name', 'build', 'vendor', 'amount', 'retention_percent', 'status', 'trigger_type')
+    list_filter = ('status', 'trigger_type')
+    search_fields = ('name', 'build__project__project_name')
+
+
+@admin.register(HandoverCertificate)
+class HandoverCertificateAdmin(admin.ModelAdmin):
+    list_display = ('certificate_number', 'build', 'vendor', 'site_name', 'status', 'issued_date')
+    list_filter = ('status',)
+    search_fields = ('certificate_number', 'site_name', 'build__project__project_name')

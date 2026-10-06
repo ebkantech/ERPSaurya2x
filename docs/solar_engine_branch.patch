@@ -1,0 +1,2942 @@
+From b8920fe91245de00ca5ecbffdac8a54708bba233 Mon Sep 17 00:00:00 2001
+From: ebkantech <g4ghalib@gmail.com>
+Date: Mon, 5 Oct 2026 08:02:39 +0000
+Subject: [PATCH 1/3] Add BRQ and break-points analysis docs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add docs/BRQ.md — a Business Requirements Document reverse-engineered from
+the live codebase (modules, roles, functional/non-functional requirements,
+data model, integrations).
+
+Add docs/BREAK_POINTS.md — a severity-ranked risk register of where the
+application breaks or can be broken, each finding verified against the code
+(unauthenticated procurement/quotation/report APIs, a missing search
+migration, insecure default SECRET_KEY, SQLite prod fallback, ephemeral
+media, destructive bulk imports, and more) with reproduction notes.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015oPdNuFeQxhFJ7f9SNW1VJ
+---
+ docs/BREAK_POINTS.md | 209 +++++++++++++++++++++++++++++++++++++++++++
+ docs/BRQ.md          | 191 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 400 insertions(+)
+ create mode 100644 docs/BREAK_POINTS.md
+ create mode 100644 docs/BRQ.md
+
+diff --git a/docs/BREAK_POINTS.md b/docs/BREAK_POINTS.md
+new file mode 100644
+index 0000000..6fec6e4
+--- /dev/null
++++ b/docs/BREAK_POINTS.md
+@@ -0,0 +1,209 @@
++# OmegaERP (ERPSaurya2x) — Break Points & Risk Register
++
++**Date:** 2026-10-05
++**Scope:** Current `main` of `ebkantech/ERPSaurya2x`
++**Method:** Live analysis — ran the Django system check, migration check and the
++test suite; probed every URL anonymously (GET + POST) with CSRF enforced; read
++the implicated view/model/settings code. Each finding below cites concrete
++evidence (`file:line`), so it can be reproduced.
++
++> A "break point" here means a place where the application **breaks, can be
++> broken, or silently does the wrong thing** — security gaps, data-loss paths,
++> deploy-time failures and config traps. Findings are ordered by severity.
++> This complements `docs/BRQ.md` (what the app is supposed to do).
++
++---
++
++## Severity summary
++
++| Sev | Count | Theme |
++|-----|-------|-------|
++| 🔴 Critical | 3 | Unauthenticated data access/writes; missing migration; insecure default secret |
++| 🟠 High | 4 | Inconsistent auth model; SQLite prod fallback; ephemeral media; destructive bulk ops |
++| 🟡 Medium | 4 | Hardcoded reset password; unauthenticated AI/cost endpoint; system-health FS walk; CSRF on webhook path |
++| 🔵 Low | 3 | Static manifest in tests; stale README/portal; duplicate vendor-create forms |
++
++---
++
++## 🔴 Critical
++
++### BP-1 — Procurement, quotation and report APIs have **no server-side authentication**
++The React app only guards routes **client-side** (`frontend/src/App.jsx:47`
++`PrivateRoute`). Several backend apps do not re-check auth, so the endpoints are
++reachable directly (curl/Postman) with **no login**.
++
++**Confirmed anonymous (not redirected to login) via probe:**
++- All Purchase Order APIs — list, **create**, detail, update, add item/reference/delivery/vehicle/invoice/**payment**/document/activity/notification, dashboard, vendor-options, bulk-generate, bulk-check (`purchase_orders/views.py`, `purchase_orders/urls.py`, aliased in `omegaerp/urls.py`).
++- All Quotation APIs — list, **create**, detail, update, verify, **generate-po**, pdf (`purchase_orders/quotation_views.py`).
++- Report APIs — `report_center_api`, `saved_report_create_api` (`reports/views.py`).
++- `vendor_master` HTML page at `/procurement/vendors/` (GET; POST is at least gated by `can_create_vendors`).
++
++**Evidence:** `purchase_orders/views.py:111 purchase_order_create_api` only
++checks `request.method`; the user is used as `request.user if
++request.user.is_authenticated else None` (lines 120, 627, 663) — i.e. anonymous
++is explicitly tolerated. There is **no login-required middleware**
++(`omegaerp/settings/base.py:47` MIDDLEWARE has only `AuthenticationMiddleware`).
++
++**Impact:** Anyone who can reach the server can read procurement/financial data
++and create/modify POs, payments, quotations and reports.
++
++**Fix:** Add an auth gate to every data endpoint (decorator or a DRF-style
++`permission_classes`), or a global login-required middleware with an explicit
++allowlist (`/api/auth/login/`, the Razorpay webhook). Do **not** rely on the
++SPA's `PrivateRoute`.
++
++### BP-2 — Missing database migration for `search.ExistingDocument` → runtime crash in production
++`search/models.py:22` defines `ExistingDocument`, but `search/migrations/` has
++only `0001_initial.py` — no migration creates its table.
++
++**Evidence:** `python manage.py makemigrations --check` reports
++`search/migrations/0002_existingdocument.py … + Create model ExistingDocument`
++is still pending. `build.sh` runs `migrate` (not `makemigrations`), so the table
++is **never created** in production. Any query against `ExistingDocument`
++(e.g. `search/management/commands/import_from_db.py`) raises
++`Programming/OperationalError: relation does not exist`.
++
++There is also a pending `core` migration
++(`0005_alter_projectworkallocation_completed_mw`) — model/DB drift.
++
++**Fix:** Run `python manage.py makemigrations search core`, commit the generated
++files, and keep `makemigrations --check` in CI so drift fails the build.
++
++### BP-3 — Insecure default `SECRET_KEY` silently used when the env var is unset
++`omegaerp/settings/base.py:10` defines
++`SECRET_KEY=(str, 'unsafe-development-secret-key')`. If `SECRET_KEY` is not set
++in the environment, production boots with a **publicly known key** instead of
++failing.
++
++**Impact:** Known secret → forgeable sessions, signed cookies and password-reset
++tokens.
++
++**Fix:** In production settings require the key with no default
++(`env('SECRET_KEY')` and let it raise), or assert it differs from the dev
++sentinel at startup.
++
++---
++
++## 🟠 High
++
++### BP-4 — Inconsistent authorization model across apps
++Some apps **do** enforce auth and redirect anonymous users to `/admin/login/`
++(all of `core.urls`, `administration`, `vendor-control`), while
++`purchase_orders`, `quotations` and `reports` do not (BP-1). The split is
++accidental, not designed, which makes it easy to add a new endpoint on the
++"open" side and not notice.
++
++**Fix:** One documented, enforced pattern for all JSON endpoints; add a
++regression test that probes every URL anonymously and asserts 401/403.
++
++### BP-5 — Production can silently fall back to **ephemeral SQLite**
++`omegaerp/settings/base.py:~84` falls back to
++`sqlite:///db.sqlite3` when none of `DATABASE_URL` / `POSTGRES_URL` / … are set.
++On a serverless host (Vercel) the filesystem is reset per invocation, so data
++"disappears" between requests with **no error**.
++
++**Fix:** In production settings, fail hard if no Postgres URL is resolved rather
++than defaulting to SQLite.
++
++### BP-6 — Uploaded media is lost on serverless unless Blob is configured
++`STORAGES['default']` is local `FileSystemStorage` unless
++`BLOB_READ_WRITE_TOKEN` is set (`settings/base.py`). Vendor bank proofs, PO
++documents, payment proofs etc. are written to an ephemeral disk on Vercel/
++Render-without-disk and **vanish**.
++
++**Fix:** Make object storage mandatory in production (assert the token), or
++document a persistent-disk deployment target.
++
++### BP-7 — Destructive "replace-all" bulk operations with no backup/confirmation
++- Material import: `MaterialMaster.objects.all().delete()` then bulk-create from the uploaded `.xlsx` (`core/views.py import_material_master`).
++- Project distribution save: `project.allocations.all().delete()` then bulk-create (`core/views.py save_project_distribution`).
++
++Combined with BP-1/BP-4 (these live under `core.urls`, which **is** auth-gated,
++so lower risk than PO), a single bad upload wipes the whole table.
++
++**Fix:** Wrap in a transaction (project save already validates MW), take a
++pre-change snapshot, and require explicit confirmation for full-table replace.
++
++---
++
++## 🟡 Medium
++
++### BP-8 — Hardcoded fallback password on admin reset
++`administration/views.py:418` —
++`new_password = request.POST.get('new_password') or 'ChangeMe123!'`. If an admin
++submits the reset action without a value, the account is set to a **well-known
++password**.
++
++**Fix:** Require an explicit password (or generate a random one and force change
++on next login); never fall back to a constant.
++
++### BP-9 — AI assistant endpoint is unauthenticated **and** `@csrf_exempt`
++`search/views.py:160-161` — `api_chat` is `@csrf_exempt` and has no auth check,
++mounted at `/api/chat/` (`omegaerp/urls.py`). It can invoke the OpenAI path.
++
++**Impact:** Anonymous cost abuse (burns API quota) and data exposure from
++whatever the assistant can retrieve.
++
++**Fix:** Require authentication; keep CSRF (the SPA already sends the token) or
++restrict to same-origin.
++
++### BP-10 — `system_health_view` walks the entire media tree on every load
++`administration/system_health_view` does `rglob('*')` over `MEDIA_ROOT` to sum
++storage, plus a raw `SELECT 1`, on each request. On a large media set / object
++storage this is slow and can time out.
++
++**Fix:** Cache the figure or compute it from storage metadata asynchronously.
++
++### BP-11 — Razorpay webhook correctly `@csrf_exempt`, but relies solely on signature
++`payments/views.py razorpay_webhook` is `@csrf_exempt` (correct for a webhook)
++and verifies the signature — **but** returns HTTP 200 even on internal errors
++(by design, to stop retries) and skips verification entirely if
++`RAZORPAY_WEBHOOK_SECRET` is blank (`gateway.verify_webhook_signature` returns
++`False` → 400, which is fine). Confirm the secret is always set in production so
++the endpoint cannot be driven by forged payloads; the swallow-all `except` also
++hides genuine reconciliation failures.
++
++**Fix:** Alert/log (not just `traceback.print_exc()`) on webhook processing
++errors; assert the webhook secret is configured in production.
++
++---
++
++## 🔵 Low / Hygiene
++
++### BP-12 — `ManifestStaticFilesStorage` requires `collectstatic` (test-env trap)
++The test suite fails with `Missing staticfiles manifest entry for
++'legacy/css/custom.css'` because tests don't run `collectstatic`. The file
++**does** exist on disk (`static/legacy/css/custom.css`) and `build.sh` runs
++`collectstatic`, so production is fine — but CI/tests need
++`collectstatic` first or a non-manifest storage override for tests.
++
++### BP-13 — README describes a vendor portal and paths that aren't in this repo
++`README.md` references `vendor_portal_site/` and Windows absolute paths
++(`C:/Users/...`); the directory is **absent** here. Misleads onboarding/deploy.
++
++**Fix:** Trim the README to what ships, or add the portal.
++
++### BP-14 — Two parallel vendor-create forms write the same table
++`core.views.register_vendor` (full KYC, used by React) and
++`vendors.views.vendor_master` (`VendorMasterForm`, shorter) both write
++`core.Vendor`. Divergent validation on one entity invites inconsistent data.
++
++**Fix:** Consolidate on one create path; make the other delegate to it.
++
++---
++
++## How to reproduce the headline finding (BP-1)
++
++With the app running and **no login**, a `POST` to `/api/purchase-orders/create/`
++(with a valid CSRF cookie from any GET) returns `201 Created` rather than
++`401/403`. The anonymous URL probe used for this report drove every route with
++GET and POST and recorded which ones bypassed the login redirect; the full
++list is in BP-1.
++
++## Suggested remediation order
++
++1. **BP-1 / BP-4** — put an auth gate on all data endpoints (single biggest exposure).
++2. **BP-2** — generate and commit the missing migrations; add `--check` to CI.
++3. **BP-3 / BP-5 / BP-6** — harden production settings (secret, DB, storage) to fail fast instead of defaulting.
++4. **BP-8 / BP-9** — close the reset-password fallback and lock down `/api/chat/`.
++5. Everything else as hygiene.
+diff --git a/docs/BRQ.md b/docs/BRQ.md
+new file mode 100644
+index 0000000..9502cd6
+--- /dev/null
++++ b/docs/BRQ.md
+@@ -0,0 +1,191 @@
++# OmegaERP (ERPSaurya2x) — Business Requirements Document (BRQ)
++
++**Version:** 1.0
++**Date:** 2026-10-05
++**Repository:** `ebkantech/ERPSaurya2x`
++**Status:** Reverse-engineered from the current codebase (Django 6.0.5 backend + React SPA frontend)
++
++> This BRQ was produced by reading the live source, data models, URL routing and
++> views. It documents what the system **is required to do today** (as built),
++> framed as business requirements, so it can serve as a baseline for sign-off,
++> gap analysis and future scope. Known defects and risks are **not** listed here —
++> they live in the companion document `docs/BREAK_POINTS.md`.
++
++---
++
++## 1. Purpose & Background
++
++OmegaERP is an internal **Enterprise Resource Planning** workspace for a
++renewable-energy / EPC (Engineering, Procurement, Construction) business whose
++primary line is **solar** (with biogas, infrastructure and pharma divisions
++also configured). It centralises vendor onboarding, project distribution,
++material master data, procurement (quotations and purchase orders), delivery
++and transport tracking, vendor payments, and staff administration.
++
++The product is mid-migration from a legacy **server-rendered Django UI** to a
++**React single-page application** that talks to the Django backend over JSON
++APIs. Both UIs currently coexist (see `MIGRATION_AUDIT.md`).
++
++## 2. Business Objectives
++
++| # | Objective |
++|---|-----------|
++| O1 | Maintain a single source of truth for vendors, projects, materials and procurement |
++| O2 | Formalise vendor onboarding, including KYC capture and an onboarding-fee collection step |
++| O3 | Give each project a controlled work-package distribution across vendors with MW-capacity validation |
++| O4 | Track the full procurement lifecycle: quotation → purchase order → delivery → invoice → payment |
++| O5 | Enforce role-based access so staff only see and act on the vendors/tasks assigned to them |
++| O6 | Provide reporting and an AI assistant over the operational data |
++| O7 | Support cloud deployment (Render / Vercel) with PostgreSQL and object storage |
++
++## 3. Stakeholders & Roles
++
++Roles are defined in `permissions/constants.py` and mapped to Django groups:
++
++| Role | Business meaning | Access tier |
++|------|------------------|-------------|
++| Super Admin / Admin | Full system control, administration module | Admin-like (all vendors/tasks) |
++| HR | People/staff administration | Staff |
++| Accounts / Accounts Staff | Payments, financial reporting | Staff |
++| Purchase Manager / Purchase Staff | Procurement, POs, quotations | Staff |
++| Vendor Manager | Vendor onboarding and allocation | Staff |
++| Site Staff / Site Engineer | Field/project execution, deliveries | Staff |
++| Project Manager | Project distribution and tracking | Staff |
++| Viewer | Read-only | Read-only |
++
++**Access model:** Admin-like roles see everything. Other staff see only the
++vendors assigned to them through **Vendor Assignments**, and the tasks that
++flow from those assignments. Viewers cannot write.
++
++## 4. Scope
++
++### 4.1 In scope (built today)
++Vendor registration & master, project master & distribution, material master,
++quotation builder, purchase orders (full lifecycle), deliveries, invoices/
++challans, vehicle movements, vendor payments (incl. Razorpay onboarding fee),
++vendor allocation/assignment, tasks & follow-ups, business documents,
++notifications, saved reports, AI assistant (keyword + optional semantic search),
++and a 19-screen administration module.
++
++### 4.2 Out of scope / future
++Full retirement of the legacy Django template UI; wiring the remaining
++mock/hardcoded React screens to live APIs; a standalone vendor-facing portal
++(referenced in README but **not present** in this repository).
++
++## 5. Functional Requirements by Module
++
++### FR-1 Authentication & Session
++- FR-1.1 Staff authenticate with username/password via `POST /api/auth/login/`.
++- FR-1.2 A "remember me" flag controls session expiry (browser-close vs persistent).
++- FR-1.3 `GET /api/auth/session/` returns the current user, role and permissions; returns 401 when logged out.
++- FR-1.4 `POST /api/auth/logout/` ends the session.
++- FR-1.5 The React app guards routes client-side via `PrivateRoute`/`AuthContext`.
++
++### FR-2 Vendor Management
++- FR-2.1 Register a vendor with full KYC (company, contact, GST/PAN/Aadhaar, MSME/PF, turnover, bank details + bank-proof file upload ≤5 MB, pdf/jpg/png).
++- FR-2.2 Auto-assign a vendor ID (`VPF###`) on creation.
++- FR-2.3 List, search (by id/name/company/contact/GST) and filter vendors by status.
++- FR-2.4 Update vendor records and resend the registration link.
++- FR-2.5 Vendor-create permission is gated by `can_create` on the `vendors` module (admins always allowed) — one shared gate (`permissions.utils.can_create_vendors`) for both creation paths.
++
++### FR-3 Vendor Onboarding Fee (Payments)
++- FR-3.1 When Razorpay keys + a non-zero fee are configured, issue a hosted **Payment Link** and email it to the vendor.
++- FR-3.2 Reconcile payment via a signed Razorpay **webhook** (`payment_link.paid` / `payment.captured`); idempotent; promotes the vendor to `active` once paid.
++- FR-3.3 Offer a **bank-transfer / UPI** alternative using configured company account details.
++- FR-3.4 The gateway degrades to "disabled" (never blocks registration) when keys/SDK/fee are absent.
++
++### FR-4 Project Management
++- FR-4.1 Maintain a Project Master (auto code `PRJ###`, client, business unit, location, total MW, status).
++- FR-4.2 Distribute project work across vendors by **work package** with allocated/completed MW and timelines.
++- FR-4.3 Distribution save **validates allocated MW against project capacity** and performs a destructive replace-all of allocations per project.
++
++### FR-5 Material Management
++- FR-5.1 Maintain a Material Master (code, work package, specification, qty, MW, rates, HSN, GST%).
++- FR-5.2 Bulk-import material master from `.xlsx` (full-table replace) and clear imports.
++- FR-5.3 Update a material's work package; expose list/options/create JSON APIs consumed by the React Material list.
++
++### FR-6 Procurement — Quotations
++- FR-6.1 Build a quotation (auto number `QTN####`) with client/sender parties and line items (material, unit, qty).
++- FR-6.2 Edit while in Draft; **Verify** to lock editing; export a **PDF** (reportlab).
++- FR-6.3 **Generate a Purchase Order** from a verified quotation (one-to-one; a quotation can convert only once).
++
++### FR-7 Procurement — Purchase Orders
++- FR-7.1 Create a PO (unique number, vendor, division, site, terms, documents, status) with auto vendor-tracking snapshot.
++- FR-7.2 Add line items (qty × rate × GST → auto totals) and recompute PO value/outstanding.
++- FR-7.3 Record against a PO: reference codes, deliveries, vehicle movements, invoices/challans, payments, business documents, notifications, and activity log entries.
++- FR-7.4 Auto-derive PO delivery status, payment status and overall status from item/delivery/payment aggregates (`refresh_progress`).
++- FR-7.5 Bulk-generate POs from `.xlsx` or `.pdf` product lists (with a pre-check/validation step).
++- FR-7.6 Every write is journalled to PO Activity Log + System Audit Log + Vendor Activity Log.
++
++### FR-8 Deliveries & Transport
++- FR-8.1 Track deliveries against PO items with delivered quantities and statuses; roll up to item/PO level.
++- FR-8.2 Record invoice/challan documents per delivery.
++- FR-8.3 Record vehicle movements linked to deliveries.
++
++### FR-9 Vendor Allocation (Vendor Control)
++- FR-9.1 Assign staff to vendors as primary/supporting, with a uniqueness constraint of **one active primary per vendor**.
++- FR-9.2 Maintain assignment history on every reassignment.
++- FR-9.3 Bulk-assign (manual + Excel upload) and auto-distribute vendors across staff.
++- FR-9.4 Provide dashboard, distribution, history and staff-performance views scoped by role.
++
++### FR-10 Tasks & Follow-ups
++- FR-10.1 Create vendor tasks, update status, and surface per-user follow-ups, scoped to accessible vendors.
++
++### FR-11 Reporting
++- FR-11.1 Produce report datasets (e.g. PO summary, vendor-PO) and allow saving report definitions.
++
++### FR-12 AI Assistant
++- FR-12.1 Answer natural-language queries over operational data via `POST /api/chat/` with intent detection and hybrid (keyword + optional semantic) search; semantic search degrades to keyword-only when ML deps are absent.
++
++### FR-13 Administration (19 screens)
++- FR-13.1 Profile, account security (password/contact/sessions), notification & personal preferences.
++- FR-13.2 Company settings, ERP configuration, appearance/branding, dashboard & security settings.
++- FR-13.3 User & role management, permission matrix, master data, audit logs, system health, backup/restore, email & WhatsApp settings, help/support.
++
++## 6. Non-Functional Requirements
++
++| # | Requirement |
++|---|-------------|
++| NFR-1 | **Security:** role-based authorization; server-side auth on all data endpoints; HTTPS/HSTS, secure cookies, CSRF, nosniff, X-Frame-Options DENY in production. |
++| NFR-2 | **Data integrity:** destructive bulk operations (material/project import) run atomically; financial roll-ups computed server-side. |
++| NFR-3 | **Auditability:** every procurement and admin write produces a System Audit Log entry. |
++| NFR-4 | **Portability:** environment-driven config (`django-environ`); PostgreSQL in production; object storage (Vercel Blob) for uploads when configured. |
++| NFR-5 | **Deployability:** WhiteNoise static serving, Gunicorn, `build.sh` runs `collectstatic` + `migrate`; Render/Vercel targets. |
++| NFR-6 | **Performance:** list endpoints paginated/filterable; DB connection pooling (`CONN_MAX_AGE`) and health checks. |
++| NFR-7 | **Resilience:** optional integrations (Razorpay, semantic search, PDF import) degrade gracefully when their dependencies/keys are absent. |
++
++## 7. Data Model (key entities)
++
++`Vendor`, `ProjectMaster`, `ProjectWorkAllocation`, `WorkPackage`,
++`BusinessUnit`, `MaterialMaster`, `MaterialQuotation` (legacy) /
++`Quotation`+`QuotationItem` (React), `PurchaseOrder`+`PurchaseOrderItem`+
++`PurchaseOrderReferenceCode`+`PurchaseOrderActivityLog`, `Delivery`+
++`DeliveryInvoiceChallan`, `VehicleMovement`, `VendorPayment`+
++`VendorRegistrationPayment`, `VendorAssignment`+`VendorAssignmentHistory`,
++`VendorTask`, `BusinessDocument`+`NotificationLog`, `Notification`,
++`SavedReport`, `StaffProfile`, `RolePermission`, `SystemAuditLog`,
++`VendorActivityLog`, search `Document`/`ExistingDocument`.
++
++## 8. External Integrations
++
++| Integration | Purpose | Failure mode |
++|-------------|---------|--------------|
++| Razorpay | Onboarding-fee payment links + webhook reconciliation | Degrades to "disabled" |
++| OpenAI / embeddings | AI assistant semantic search | Degrades to keyword search |
++| Email (SMTP) | Registration links, test mail | Configurable; no-op if unset |
++| Vercel Blob | Private storage for vendor documents | Falls back to local filesystem |
++| PostgreSQL / pgvector | Primary datastore + vector index | Falls back to SQLite (see break points) |
++
++## 9. Assumptions & Constraints
++
++- Python 3.14 / Django 6.0.5 is the target runtime (README); the code also runs on 3.13.
++- The standalone vendor portal described in README is **not** in this repository.
++- The legacy Django template UI is being retired; new frontend work targets `/api/` endpoints only.
++
++## 10. Acceptance Criteria (baseline)
++
++Each functional requirement above is "met" when its API endpoint(s) return the
++documented success response for an **authorized** user and reject unauthorized
++or malformed requests. Current deviations from this baseline — most importantly
++endpoints that do not yet enforce authorization — are tracked in
++`docs/BREAK_POINTS.md` and must be closed before production sign-off.
+-- 
+2.43.0
+
+
+From 0be4aa54424415dbacc5b7a5b367af59965ae2dc Mon Sep 17 00:00:00 2001
+From: ebkantech <g4ghalib@gmail.com>
+Date: Mon, 5 Oct 2026 10:21:17 +0000
+Subject: [PATCH 2/3] Add solar project work-structure & BOQ engine design doc
+
+Design for a config-driven engine that instantiates a reusable, editable
+WBS + BOQ template per project from its capacity (MW) and execution mode
+(rooftop / ground-mount), derived from the 5 MW rooftop study book. Covers
+the data model, sizing calculator (reproduces the book: 40 inverters, 420
+strings, 10,920 modules, 6.006 MWp, 2x2.5 MVA), seeded templates, APIs,
+scope and acceptance criteria.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015oPdNuFeQxhFJ7f9SNW1VJ
+---
+ docs/SOLAR_PROJECT_ENGINE.md | 237 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 237 insertions(+)
+ create mode 100644 docs/SOLAR_PROJECT_ENGINE.md
+
+diff --git a/docs/SOLAR_PROJECT_ENGINE.md b/docs/SOLAR_PROJECT_ENGINE.md
+new file mode 100644
+index 0000000..83781e0
+--- /dev/null
++++ b/docs/SOLAR_PROJECT_ENGINE.md
+@@ -0,0 +1,237 @@
++# OmegaERP — Solar Project Work-Structure & BOQ Engine
++
++**Version:** 0.1 (design for sign-off)
++**Date:** 2026-10-05
++**Repository:** `ebkantech/ERPSaurya2x`
++**Branch:** `claude/gifted-bell-lp4g6m`
++**Source of truth for the lifecycle:** *5 MW Rooftop Solar — Complete Study Book*
++(uploaded), mapped here to a reusable, config-driven engine.
++
++---
++
++## 1. What we are building
++
++A **Project Work-Structure Engine**: when a project is created with a
++**capacity (MW)** and an **execution mode**, the engine instantiates a reusable,
++engineer-editable **template** into that project — producing:
++
++1. A staged **Work Breakdown Structure (WBS)** — the lifecycle stages and the
++   work packages under each (Survey → Design → Procurement → Installation →
++   Testing → Commissioning → Performance → Handover → O&M).
++2. An **engineering sizing** block (strings, inverters, transformers, HT) derived
++   from the chosen component specs.
++3. A seeded, fully-editable **Bill of Quantities (BOQ)** with material + labour
++   columns, following the book's BOQ method.
++
++Two execution modes are first-class:
++
++| Mode | `project_type` | Meaning | Extra scope vs the other |
++|------|----------------|---------|--------------------------|
++| **Open Roof (Rooftop)** | `rooftop` | PV on an existing building roof | Structural/roof survey, ballast or penetration fixing, roof waterproofing, parapet/access, no land civil works |
++| **On-Site Solar EPC (Ground-mount)** | `ground_mount` | Ground-mounted plant on open land | Land survey/levelling, pile foundations, module tables/seasonal tilt, boundary & roads, trenching, security — no roof scope |
++
++Both share the **electrical core** (DC → inverter → AC → transformer → HT → PCC
++→ grid) and the **safety/control** subsystems (earthing, LPS/SPD, SCADA, PPC).
++
++### Design principle (per your choice): **config-driven templates**
++The template is the source of truth, not hard-coded math. An engineer edits a
++template per mode (stages, work packages, BOQ lines, and *how each line scales*).
++On project creation the engine **instantiates** the template and **seeds**
++quantities from the scaling rule; every seeded value is then **editable** per
++project before the structure is **locked**. Re-running against the 5 MW book
++reproduces the reference plant exactly, but nothing is frozen in code.
++
++---
++
++## 2. How it fits the existing app
++
++- Anchors to the existing **`core.ProjectMaster`** (has `total_mw`, `project_code`, `status`, `business_unit`).
++- Reuses **`core.WorkPackage`** names where possible; the engine's WBS packages reference them.
++- The instantiated BOQ is the natural feed into the existing procurement flow: a locked BOQ section can generate a **`purchase_orders` / `MaterialQuotation`** draft (future step, out of scope for v1 but the FK is designed in).
++- New code lives in a new Django app **`solar_engine`** so it is cleanly separable and does not disturb the apps flagged in `docs/BREAK_POINTS.md`.
++
++```
++core.ProjectMaster ──1:1──> ProjectBuild ──*──> ProjectStage ──*──> ProjectWorkPackage
++                                   │
++                                   ├──*──> ProjectBoqItem      (seeded from BoqTemplateItem)
++                                   └──1:1─> ProjectSizing       (strings/inverters/transformers)
++
++WbsTemplate(mode) ──*──> WbsStage ──*──> WbsWorkPackage        (reusable, editable)
++BoqTemplate(mode) ──*──> BoqSection ──*──> BoqTemplateItem      (reusable, editable)
++ComponentSpecSet ────────────────────────────────────────────  (module Wp, inverter kW, …)
++```
++
++---
++
++## 3. Data model
++
++### 3.1 Enumerations
++- `PROJECT_TYPE = {rooftop, ground_mount}`
++- `QUANTITY_BASIS = {fixed, per_mw_ac, per_mwp_dc, per_string, per_inverter, per_transformer, per_acdb, per_sqm_area}`
++  — how a BOQ line's quantity is seeded.
++- `STAGE_STATUS / WP_STATUS = {pending, in_progress, completed, on_hold, skipped}`
++- `BUILD_STATUS = {draft, locked, in_execution, completed}`
++
++### 3.2 Template (config, reusable, editable)
++
++**`ComponentSpecSet`** — the engineering inputs that drive sizing. Defaults from the book:
++| field | default (book) |
++|-------|----------------|
++| `module_wp` | 550 |
++| `modules_per_string` | 26 |
++| `inverter_kw` | 125 |
++| `transformer_mva` | 2.5 |
++| `lv_voltage` / `ht_voltage` | 415 V / 11 kV |
++| `target_dc_ac_ratio` | 1.20 |
++| `modules_per_acdb_group` | (derived; 4 ACDB @ 5 MW) |
++
++**`WbsTemplate`** `(name, project_type, is_active)` → **`WbsStage`** `(template, order, code, name, description)` → **`WbsWorkPackage`** `(stage, order, name, core_workpackage→core.WorkPackage?, discipline, is_parallel)`.
++
++**`BoqTemplate`** `(name, project_type, is_active)` → **`BoqSection`** `(template, order, name)` → **`BoqTemplateItem`**:
++```
++section, order, description, specification, unit,
++quantity_basis (QUANTITY_BASIS), quantity_factor (Decimal),
++default_material_rate, default_labour_rate, wbs_stage (optional link)
++```
++`quantity_factor` is "per unit of the basis". E.g. a module line: basis
++`per_mwp_dc`, factor ≈ 1820 (10,920 ÷ 6.006). Seeded qty = factor × basis value.
++
++### 3.3 Project instance (generated, then editable)
++
++**`ProjectBuild`** `(project→core.ProjectMaster 1:1, project_type, ac_capacity_mw, spec_set→ComponentSpecSet, wbs_template, boq_template, status=BUILD_STATUS, locked_at, created_by)`
++
++**`ProjectSizing`** `(build 1:1, dc_capacity_mwp, module_count, string_count, inverter_count, transformer_count, acdb_count, dc_ac_ratio, …)` — computed on instantiate, editable until lock.
++
++**`ProjectStage`** `(build, order, code, name, status, planned_start, planned_end, actual_start, actual_end, source_stage→WbsStage?)`
++**`ProjectWorkPackage`** `(stage, order, name, discipline, status, allocation→core.ProjectWorkAllocation?, source_wp→WbsWorkPackage?)`
++— the optional `allocation` FK is how a work package links to the existing
++vendor/MW allocation model, so execution tracking reuses what's already there.
++
++**`ProjectBoqItem`** `(build, section_name, order, description, specification, unit, quantity, material_rate, labour_rate, source_item→BoqTemplateItem?)`
++with computed properties `material_amount = qty×material_rate`,
++`labour_amount = qty×labour_rate`, `total = material+labour` — exactly the
++book's BOQ column method (slide 29).
++
++---
++
++## 4. The sizing calculator (seed values)
++
++Given `ac_mw` and a `ComponentSpecSet`, instantiation seeds `ProjectSizing`:
++
++```
++inverter_count   = ceil(ac_mw*1000 / inverter_kw)
++dc_target_mwp    = ac_mw * target_dc_ac_ratio
++modules_needed   = ceil(dc_target_mwp*1e6 / module_wp)
++string_count     = round(modules_needed / modules_per_string)
++module_count     = string_count * modules_per_string
++dc_capacity_mwp  = module_count * module_wp / 1e6
++dc_ac_ratio      = dc_capacity_mwp / ac_mw
++transformer_count= ceil(ac_mw / transformer_mva)
++acdb_count       = ceil(inverter_count / inverters_per_acdb)   # default group size from specs
++```
++
++**Verification against the book (5 MW, defaults):**
++`inverter_count = ceil(5000/125) = 40` ✓ · `dc_target = 6.0 MWp` →
++`modules = ceil(6.0e6/550)=10,910 → 420 strings? ` — the book rounds to
++**420 strings × 26 = 10,920 modules → 6.006 MWp** (DC/AC 1.20). The engine
++rounds on **whole strings**, reproducing 420 strings / 10,920 modules / 6.006 MWp
++exactly ✓ · `transformers = ceil(5/2.5)=2` ✓ · `ACDB = 4` ✓. These seed values
++are then editable, per your config-driven requirement.
++
++> Every computed value carries the book's disclaimer in the UI: *"Final project
++> values must follow approved drawings, datasheets, calculations, standards and
++> utility requirements."*
++
++---
++
++## 5. Seeded templates (from the study book)
++
++Two `WbsTemplate`s and two `BoqTemplate`s are shipped via a seed command
++(`manage.py seed_solar_templates`), both editable afterwards.
++
++### 5.1 WBS stages (shared spine, mode-specific packages)
++1. **Survey & Feasibility** — site survey, shadow analysis; *(rooftop)* structural/roof-load survey; *(ground)* land survey, soil resistivity (Wenner), levelling.
++2. **Engineering & Design** — SLD, string/inverter/AC layout, earthing & LPS, HT, SCADA architecture, IFC drawing control.
++3. **Approvals** — structural approval, utility/grid SLD approval, metering approval.
++4. **Procurement & Inspection** — modules, structure, inverter, cables, ACDB, transformer, HT panel, metering, earthing, LPS, SCADA; receipt/NCR records.
++5. **Mobilization & Civil/Roof Prep** — *(rooftop)* roof prep, waterproofing, ballast/penetration fixing; *(ground)* piling, foundations, module tables, trenching, roads/boundary.
++6. **Mounting & Module Installation** — structure, alignment/torque/bonding, modules, string cabling.
++7. **DC Installation & Pre-Commissioning** — DC cabling, isolators/SPD, polarity, string Voc, IR, I-V, thermography.
++8. **AC / Transformer / HT** — ACDB, LT cabling, transformer, HT VCB/CT/PT/relay, PCC & metering.
++9. **Safety Systems (parallel)** — equipment earthing, earth grid, lightning protection, SPD coordination.
++10. **Monitoring & Control (parallel)** — SCADA, weather station, PPC.
++11. **Testing & Commissioning** — AC/transformer/HT tests, pre-commissioning checklist, energization sequence, synchronization, anti-islanding.
++12. **Performance Test** — PR, MWh, availability, punch-list closure.
++13. **Handover** — as-built drawings, test/commissioning reports, relay settings, warranties, O&M manuals, training.
++14. **O&M** — scheduled maintenance, performance monitoring, spares.
++
++### 5.2 BOQ sections (both modes; quantities seeded by basis)
++PV Modules · Mounting Structure (mode-specific) · DC System (cables, connectors,
++isolators, DC SPD) · Inverters · AC System (ACDB, LT cable, AC SPD) ·
++Transformer · HT System (VCB, CT/PT, relay, metering) · Earthing ·
++Lightning Protection · SCADA/PPC & Weather · Cable Trays & Accessories ·
++Civil/Roof works (mode-specific) · Testing & Commissioning · Engineering & Docs.
++
++Example seeded lines (5 MW rooftop):
++| Description | Unit | Basis | Factor | Seed qty @5 MW |
++|-------------|------|-------|--------|----------------|
++| 550 Wp PV module | Nos | per_mwp_dc | 1818.18 | 10,920 |
++| PV string set | Nos | per_string | 1 | 420 |
++| 125 kW inverter | Nos | per_inverter | 1 | 40 |
++| ACDB | Nos | per_acdb | 1 | 4 |
++| 2.5 MVA transformer | Nos | per_transformer | 1 | 2 |
++| HT VCB (incomer/outgoing/bus-coupler) | Nos | fixed | 4 | 4 |
++
++---
++
++## 6. Services / API
++
++New views follow the app's existing plain-`JsonResponse` style and **enforce
++authentication** (addressing BP-1/BP-4 for all new endpoints):
++
++| Method & path | Purpose |
++|---------------|---------|
++| `POST /api/solar/projects/<project_id>/build/` | Instantiate a build for a project: body `{project_type, ac_capacity_mw, spec_set_id?}` → creates `ProjectBuild`+`ProjectSizing`+stages+WPs+seeded BOQ |
++| `GET /api/solar/projects/<project_id>/build/` | Full build: sizing, stages, work packages, BOQ, totals |
++| `PATCH /api/solar/builds/<id>/sizing/` | Override sizing values (while draft) |
++| `PATCH /api/solar/boq-items/<id>/` | Edit a seeded BOQ line (qty/rates) |
++| `PATCH /api/solar/workpackages/<id>/` | Update WP status / dates / vendor allocation |
++| `POST /api/solar/builds/<id>/lock/` | Lock the build (freezes structure; enables PO generation) |
++| `GET /api/solar/templates/?mode=` | List editable templates |
++| CRUD on template objects | Engineer edits WBS/BOQ templates & component specs |
++
++**Engine service** (`solar_engine/services.py`): `instantiate_build(project, project_type, ac_mw, spec_set)` runs inside `transaction.atomic`, computes sizing, copies template stages/WPs/BOQ with seeded quantities, and returns the build. Idempotent guard: a project has at most one non-cancelled build.
++
++---
++
++## 7. UI flow (React, future slice)
++1. On a Project, **"Generate Work Structure"** → pick mode + confirm MW + spec set.
++2. Review tabs: **Sizing** (calculator card, editable) · **WBS** (stage accordion with work packages, status, vendor allocation) · **BOQ** (sectioned editable grid with material/labour/total, section & grand totals).
++3. **Lock** → structure becomes the execution baseline; WBS statuses drive a progress %; BOQ can spawn procurement.
++
++v1 backend ships the models + engine + seed + JSON APIs + admin + tests; the React tab is a follow-up.
++
++---
++
++## 8. Scope & acceptance (v1)
++
++**In:** `solar_engine` app; template + instance models; sizing calculator;
++`seed_solar_templates` (rooftop + ground_mount from the book); `instantiate_build`
++service; authenticated JSON APIs; Django admin for template editing; migrations;
++unit tests proving the 5 MW book reproduces (40 inverters, 420 strings, 10,920
++modules, 6.006 MWp, 2 transformers) and that seeded BOQ totals compute.
++
++**Out (phase 2):** React UI tab; BOQ→PO/quotation generation; multi-spec
++libraries; cost roll-up into project financials; PR-based review.
++
++**Acceptance:** `manage.py migrate` + `manage.py seed_solar_templates` clean;
++`manage.py test solar_engine` green; instantiating a 5 MW rooftop build yields
++the book's sizing; all new endpoints return 401/403 when logged out.
++
++---
++
++## 9. Open items for your confirmation
++1. Default **component specs** — keep the book's (550 Wp / 26 per string / 125 kW / 2.5 MVA / 11 kV, DC:AC 1.20)? These become the editable default spec set.
++2. **Ground-mount foundation type** default — piled (driven pile) vs concrete pedestal? Affects the civil BOQ seed lines.
++3. Should a **locked** BOQ auto-draft a procurement quotation now, or stay phase 2?
++4. Who may **lock** a build — admins + project managers only?
+-- 
+2.43.0
+
+
+From c01039eeb7187e6b5574d468919b74183efdeb81 Mon Sep 17 00:00:00 2001
+From: ebkantech <g4ghalib@gmail.com>
+Date: Mon, 5 Oct 2026 10:46:52 +0000
+Subject: [PATCH 3/3] Add solar project work-structure & BOQ engine
+ (solar_engine app)
+
+Implements the config-driven engine from docs/SOLAR_PROJECT_ENGINE.md:
+
+- Template layer (editable): ComponentSpecSet, WbsTemplate/Stage/WorkPackage,
+  BoqTemplate/Section/TemplateItem.
+- Project-instance layer: ProjectBuild, ProjectSizing, ProjectStage,
+  ProjectWorkPackage, ProjectBoqItem (material/labour/total per the book's
+  BOQ method), anchored 1:1 to core.ProjectMaster.
+- Sizing calculator reproduces the 5 MW study book exactly (40 inverters,
+  420 strings, 10,920 modules, 6.006 MWp, 2x2.5 MVA, 4 ACDB) and scales to
+  any capacity.
+- Two execution modes: rooftop (Open Roof) and ground_mount (On-Site EPC,
+  default driven-pile foundation), each with its own seeded WBS + BOQ.
+- seed_solar_templates management command seeds the default spec set and
+  both templates; all seeded values stay editable.
+- Lock (super admin / admin / project manager only) freezes the build and
+  auto-drafts a purchase_orders.Quotation from material BOQ lines.
+- Authenticated JSON APIs under /api/solar/ (build create/read, lock,
+  sizing/BOQ/work-package edits, templates list). Django admin for template
+  editing. 10 unit tests covering sizing, instantiation, lock/quotation and
+  auth gating.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015oPdNuFeQxhFJ7f9SNW1VJ
+---
+ omegaerp/settings/base.py                     |   1 +
+ omegaerp/urls.py                              |   3 +
+ solar_engine/__init__.py                      |   0
+ solar_engine/admin.py                         |  95 +++
+ solar_engine/apps.py                          |   7 +
+ solar_engine/constants.py                     |  63 ++
+ solar_engine/management/__init__.py           |   0
+ solar_engine/management/commands/__init__.py  |   0
+ .../commands/seed_solar_templates.py          |  82 +++
+ solar_engine/migrations/0001_initial.py       | 659 ++++++++++++++++++
+ solar_engine/migrations/__init__.py           |   0
+ solar_engine/models.py                        | 294 ++++++++
+ solar_engine/seed_data.py                     | 185 +++++
+ solar_engine/serializers.py                   | 113 +++
+ solar_engine/services.py                      | 235 +++++++
+ solar_engine/tests.py                         | 111 +++
+ solar_engine/urls.py                          |  12 +
+ solar_engine/views.py                         | 198 ++++++
+ 18 files changed, 2058 insertions(+)
+ create mode 100644 solar_engine/__init__.py
+ create mode 100644 solar_engine/admin.py
+ create mode 100644 solar_engine/apps.py
+ create mode 100644 solar_engine/constants.py
+ create mode 100644 solar_engine/management/__init__.py
+ create mode 100644 solar_engine/management/commands/__init__.py
+ create mode 100644 solar_engine/management/commands/seed_solar_templates.py
+ create mode 100644 solar_engine/migrations/0001_initial.py
+ create mode 100644 solar_engine/migrations/__init__.py
+ create mode 100644 solar_engine/models.py
+ create mode 100644 solar_engine/seed_data.py
+ create mode 100644 solar_engine/serializers.py
+ create mode 100644 solar_engine/services.py
+ create mode 100644 solar_engine/tests.py
+ create mode 100644 solar_engine/urls.py
+ create mode 100644 solar_engine/views.py
+
+diff --git a/omegaerp/settings/base.py b/omegaerp/settings/base.py
+index cabe053..79ed273 100644
+--- a/omegaerp/settings/base.py
++++ b/omegaerp/settings/base.py
+@@ -44,6 +44,7 @@ INSTALLED_APPS = [
+     'documents',
+     'reports',
+     'search',
++    'solar_engine',
+ ]
+ 
+ MIDDLEWARE = [
+diff --git a/omegaerp/urls.py b/omegaerp/urls.py
+index 72f364c..b549408 100644
+--- a/omegaerp/urls.py
++++ b/omegaerp/urls.py
+@@ -118,6 +118,9 @@ urlpatterns = [
+ 
+     # Vendor onboarding-fee payment gateway (Razorpay)
+     path('api/payments/', include('payments.urls')),
++
++    # Solar project work-structure & BOQ engine
++    path('api/solar/', include('solar_engine.urls')),
+     path('api/purchase-orders/bulk-generate/check/', purchase_order_bulk_check, name='api-po-bulk-check'),
+     path('api/purchase-orders/bulk-generate/', purchase_order_bulk_generate_api, name='api-po-bulk-generate'),
+     path('api/purchase-orders/dashboard/', purchase_order_dashboard_api, name='api-po-dashboard'),
+diff --git a/solar_engine/__init__.py b/solar_engine/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/solar_engine/admin.py b/solar_engine/admin.py
+new file mode 100644
+index 0000000..9d5a225
+--- /dev/null
++++ b/solar_engine/admin.py
+@@ -0,0 +1,95 @@
++from django.contrib import admin
++
++from .models import (
++    BoqSection,
++    BoqTemplate,
++    BoqTemplateItem,
++    ComponentSpecSet,
++    ProjectBoqItem,
++    ProjectBuild,
++    ProjectSizing,
++    ProjectStage,
++    ProjectWorkPackage,
++    WbsStage,
++    WbsTemplate,
++    WbsWorkPackage,
++)
++
++
++@admin.register(ComponentSpecSet)
++class ComponentSpecSetAdmin(admin.ModelAdmin):
++    list_display = ('name', 'is_default', 'is_active', 'module_wp', 'modules_per_string',
++                    'inverter_kw', 'transformer_mva', 'target_dc_ac_ratio')
++    list_filter = ('is_default', 'is_active')
++
++
++class WbsStageInline(admin.TabularInline):
++    model = WbsStage
++    extra = 0
++
++
++class WbsWorkPackageInline(admin.TabularInline):
++    model = WbsWorkPackage
++    extra = 0
++
++
++@admin.register(WbsTemplate)
++class WbsTemplateAdmin(admin.ModelAdmin):
++    list_display = ('name', 'project_type', 'is_default', 'is_active')
++    list_filter = ('project_type', 'is_default', 'is_active')
++    inlines = [WbsStageInline]
++
++
++@admin.register(WbsStage)
++class WbsStageAdmin(admin.ModelAdmin):
++    list_display = ('code', 'name', 'template', 'order', 'is_parallel')
++    list_filter = ('template',)
++    inlines = [WbsWorkPackageInline]
++
++
++class BoqSectionInline(admin.TabularInline):
++    model = BoqSection
++    extra = 0
++
++
++class BoqTemplateItemInline(admin.TabularInline):
++    model = BoqTemplateItem
++    extra = 0
++
++
++@admin.register(BoqTemplate)
++class BoqTemplateAdmin(admin.ModelAdmin):
++    list_display = ('name', 'project_type', 'is_default', 'is_active')
++    list_filter = ('project_type', 'is_default', 'is_active')
++    inlines = [BoqSectionInline]
++
++
++@admin.register(BoqSection)
++class BoqSectionAdmin(admin.ModelAdmin):
++    list_display = ('name', 'template', 'order', 'is_material')
++    list_filter = ('template', 'is_material')
++    inlines = [BoqTemplateItemInline]
++
++
++class ProjectStageInline(admin.TabularInline):
++    model = ProjectStage
++    extra = 0
++
++
++class ProjectBoqItemInline(admin.TabularInline):
++    model = ProjectBoqItem
++    extra = 0
++
++
++@admin.register(ProjectBuild)
++class ProjectBuildAdmin(admin.ModelAdmin):
++    list_display = ('project', 'project_type', 'ac_capacity_mw', 'status', 'locked_at')
++    list_filter = ('project_type', 'status')
++    search_fields = ('project__project_name', 'project__project_code')
++    inlines = [ProjectStageInline, ProjectBoqItemInline]
++
++
++admin.site.register(ProjectSizing)
++admin.site.register(ProjectStage)
++admin.site.register(ProjectWorkPackage)
++admin.site.register(ProjectBoqItem)
+diff --git a/solar_engine/apps.py b/solar_engine/apps.py
+new file mode 100644
+index 0000000..1e77c8e
+--- /dev/null
++++ b/solar_engine/apps.py
+@@ -0,0 +1,7 @@
++from django.apps import AppConfig
++
++
++class SolarEngineConfig(AppConfig):
++    default_auto_field = 'django.db.models.BigAutoField'
++    name = 'solar_engine'
++    verbose_name = 'Solar Project Engine'
+diff --git a/solar_engine/constants.py b/solar_engine/constants.py
+new file mode 100644
+index 0000000..6e4bc5c
+--- /dev/null
++++ b/solar_engine/constants.py
+@@ -0,0 +1,63 @@
++"""Enumerations for the solar project work-structure & BOQ engine."""
++
++# --- Execution mode -------------------------------------------------------
++PROJECT_TYPE_ROOFTOP = 'rooftop'
++PROJECT_TYPE_GROUND = 'ground_mount'
++PROJECT_TYPE_CHOICES = [
++    (PROJECT_TYPE_ROOFTOP, 'Open Roof (Rooftop)'),
++    (PROJECT_TYPE_GROUND, 'On-Site Solar EPC (Ground-mount)'),
++]
++
++# --- Ground-mount foundation (civil BOQ driver) ---------------------------
++FOUNDATION_PILE = 'driven_pile'
++FOUNDATION_PEDESTAL = 'concrete_pedestal'
++FOUNDATION_CHOICES = [
++    (FOUNDATION_PILE, 'Driven Pile'),
++    (FOUNDATION_PEDESTAL, 'Concrete Pedestal'),
++]
++
++# --- How a BOQ line's quantity is seeded from a project's parameters -------
++BASIS_FIXED = 'fixed'
++BASIS_PER_MW_AC = 'per_mw_ac'
++BASIS_PER_MWP_DC = 'per_mwp_dc'
++BASIS_PER_STRING = 'per_string'
++BASIS_PER_INVERTER = 'per_inverter'
++BASIS_PER_TRANSFORMER = 'per_transformer'
++BASIS_PER_ACDB = 'per_acdb'
++BASIS_PER_MODULE = 'per_module'
++QUANTITY_BASIS_CHOICES = [
++    (BASIS_FIXED, 'Fixed quantity'),
++    (BASIS_PER_MW_AC, 'Per MW (AC)'),
++    (BASIS_PER_MWP_DC, 'Per MWp (DC)'),
++    (BASIS_PER_STRING, 'Per string'),
++    (BASIS_PER_INVERTER, 'Per inverter'),
++    (BASIS_PER_TRANSFORMER, 'Per transformer'),
++    (BASIS_PER_ACDB, 'Per ACDB'),
++    (BASIS_PER_MODULE, 'Per module'),
++]
++
++# --- Stage / work-package execution status --------------------------------
++STATUS_PENDING = 'pending'
++STATUS_IN_PROGRESS = 'in_progress'
++STATUS_COMPLETED = 'completed'
++STATUS_ON_HOLD = 'on_hold'
++STATUS_SKIPPED = 'skipped'
++EXECUTION_STATUS_CHOICES = [
++    (STATUS_PENDING, 'Pending'),
++    (STATUS_IN_PROGRESS, 'In Progress'),
++    (STATUS_COMPLETED, 'Completed'),
++    (STATUS_ON_HOLD, 'On Hold'),
++    (STATUS_SKIPPED, 'Skipped'),
++]
++
++# --- Build lifecycle ------------------------------------------------------
++BUILD_DRAFT = 'draft'
++BUILD_LOCKED = 'locked'
++BUILD_IN_EXECUTION = 'in_execution'
++BUILD_COMPLETED = 'completed'
++BUILD_STATUS_CHOICES = [
++    (BUILD_DRAFT, 'Draft'),
++    (BUILD_LOCKED, 'Locked'),
++    (BUILD_IN_EXECUTION, 'In Execution'),
++    (BUILD_COMPLETED, 'Completed'),
++]
+diff --git a/solar_engine/management/__init__.py b/solar_engine/management/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/solar_engine/management/commands/__init__.py b/solar_engine/management/commands/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/solar_engine/management/commands/seed_solar_templates.py b/solar_engine/management/commands/seed_solar_templates.py
+new file mode 100644
+index 0000000..869f444
+--- /dev/null
++++ b/solar_engine/management/commands/seed_solar_templates.py
+@@ -0,0 +1,82 @@
++"""Seed / refresh the default component spec set and the rooftop + ground-mount
++WBS and BOQ templates from the 5 MW study book.
++
++Idempotent: re-running updates the default spec set in place and recreates the
++seeded default templates (only those named "Study Book …"), leaving any
++engineer-authored templates untouched.
++"""
++from django.core.management.base import BaseCommand
++from django.db import transaction
++
++from solar_engine import constants as C
++from solar_engine import seed_data as S
++from solar_engine.models import (
++    BoqSection,
++    BoqTemplate,
++    BoqTemplateItem,
++    ComponentSpecSet,
++    WbsStage,
++    WbsTemplate,
++    WbsWorkPackage,
++)
++
++ROOFTOP_WBS_NAME = 'Study Book Rooftop WBS'
++GROUND_WBS_NAME = 'Study Book Ground-mount WBS'
++ROOFTOP_BOQ_NAME = 'Study Book Rooftop BOQ'
++GROUND_BOQ_NAME = 'Study Book Ground-mount BOQ'
++
++
++class Command(BaseCommand):
++    help = 'Seed default solar component specs and WBS/BOQ templates.'
++
++    @transaction.atomic
++    def handle(self, *args, **options):
++        spec = self._seed_spec()
++        self._seed_wbs(ROOFTOP_WBS_NAME, C.PROJECT_TYPE_ROOFTOP, S.WBS_ROOFTOP)
++        self._seed_wbs(GROUND_WBS_NAME, C.PROJECT_TYPE_GROUND, S.WBS_GROUND)
++        self._seed_boq(ROOFTOP_BOQ_NAME, C.PROJECT_TYPE_ROOFTOP, S.BOQ_ROOFTOP)
++        self._seed_boq(GROUND_BOQ_NAME, C.PROJECT_TYPE_GROUND, S.BOQ_GROUND)
++        self.stdout.write(self.style.SUCCESS(
++            f'Seeded spec "{spec.name}" and rooftop + ground templates.'
++        ))
++
++    def _seed_spec(self):
++        data = dict(S.DEFAULT_SPEC)
++        name = data.pop('name')
++        # Only one default at a time.
++        ComponentSpecSet.objects.exclude(name=name).update(is_default=False)
++        spec, _ = ComponentSpecSet.objects.update_or_create(name=name, defaults=data)
++        return spec
++
++    def _seed_wbs(self, name, project_type, stages):
++        WbsTemplate.objects.filter(name=name).delete()
++        tpl = WbsTemplate.objects.create(
++            name=name, project_type=project_type, is_active=True, is_default=True,
++        )
++        for s_order, (code, stage_name, is_parallel, packages) in enumerate(stages, 1):
++            stage = WbsStage.objects.create(
++                template=tpl, order=s_order, code=code, name=stage_name, is_parallel=is_parallel,
++            )
++            WbsWorkPackage.objects.bulk_create([
++                WbsWorkPackage(stage=stage, order=w_order, name=pkg)
++                for w_order, pkg in enumerate(packages, 1)
++            ])
++        return tpl
++
++    def _seed_boq(self, name, project_type, sections):
++        BoqTemplate.objects.filter(name=name).delete()
++        tpl = BoqTemplate.objects.create(
++            name=name, project_type=project_type, is_active=True, is_default=True,
++        )
++        for s_order, (section_name, is_material, items) in enumerate(sections, 1):
++            section = BoqSection.objects.create(
++                template=tpl, order=s_order, name=section_name, is_material=is_material,
++            )
++            BoqTemplateItem.objects.bulk_create([
++                BoqTemplateItem(
++                    section=section, order=i_order, description=desc, specification=note,
++                    unit=unit, quantity_basis=basis, quantity_factor=factor,
++                )
++                for i_order, (desc, unit, basis, factor, note) in enumerate(items, 1)
++            ])
++        return tpl
+diff --git a/solar_engine/migrations/0001_initial.py b/solar_engine/migrations/0001_initial.py
+new file mode 100644
+index 0000000..f66a6d8
+--- /dev/null
++++ b/solar_engine/migrations/0001_initial.py
+@@ -0,0 +1,659 @@
++# Generated by Django 6.0.5 on 2026-10-05 10:45
++
++import django.db.models.deletion
++from decimal import Decimal
++from django.conf import settings
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++
++    initial = True
++
++    dependencies = [
++        ("core", "0004_materialmaster_gst_percentage_and_more"),
++        (
++            "purchase_orders",
++            "0006_quotation_client_address_quotation_client_mobile_and_more",
++        ),
++        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
++    ]
++
++    operations = [
++        migrations.CreateModel(
++            name="BoqTemplate",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("name", models.CharField(max_length=150)),
++                (
++                    "project_type",
++                    models.CharField(
++                        choices=[
++                            ("rooftop", "Open Roof (Rooftop)"),
++                            ("ground_mount", "On-Site Solar EPC (Ground-mount)"),
++                        ],
++                        max_length=20,
++                    ),
++                ),
++                ("is_active", models.BooleanField(default=True)),
++                ("is_default", models.BooleanField(default=False)),
++                ("created_at", models.DateTimeField(auto_now_add=True)),
++            ],
++            options={
++                "db_table": "solar_boq_template",
++                "ordering": ["project_type", "-is_default", "name"],
++            },
++        ),
++        migrations.CreateModel(
++            name="ComponentSpecSet",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("name", models.CharField(max_length=150, unique=True)),
++                ("is_default", models.BooleanField(default=False)),
++                ("is_active", models.BooleanField(default=True)),
++                (
++                    "module_wp",
++                    models.DecimalField(
++                        decimal_places=2, default=Decimal("550"), max_digits=8
++                    ),
++                ),
++                ("modules_per_string", models.PositiveIntegerField(default=26)),
++                (
++                    "inverter_kw",
++                    models.DecimalField(
++                        decimal_places=2, default=Decimal("125"), max_digits=10
++                    ),
++                ),
++                (
++                    "transformer_mva",
++                    models.DecimalField(
++                        decimal_places=3, default=Decimal("2.5"), max_digits=8
++                    ),
++                ),
++                ("inverters_per_acdb", models.PositiveIntegerField(default=10)),
++                (
++                    "lv_voltage",
++                    models.PositiveIntegerField(
++                        default=415, help_text="Low-voltage AC, volts"
++                    ),
++                ),
++                (
++                    "ht_voltage_kv",
++                    models.DecimalField(
++                        decimal_places=2, default=Decimal("11"), max_digits=6
++                    ),
++                ),
++                (
++                    "target_dc_ac_ratio",
++                    models.DecimalField(
++                        decimal_places=3, default=Decimal("1.200"), max_digits=5
++                    ),
++                ),
++                ("created_at", models.DateTimeField(auto_now_add=True)),
++                ("updated_at", models.DateTimeField(auto_now=True)),
++            ],
++            options={
++                "db_table": "solar_component_spec_set",
++                "ordering": ["-is_default", "name"],
++            },
++        ),
++        migrations.CreateModel(
++            name="WbsStage",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("order", models.PositiveIntegerField(default=0)),
++                ("code", models.CharField(max_length=30)),
++                ("name", models.CharField(max_length=200)),
++                ("description", models.TextField(blank=True)),
++                ("is_parallel", models.BooleanField(default=False)),
++            ],
++            options={
++                "db_table": "solar_wbs_stage",
++                "ordering": ["template", "order", "id"],
++            },
++        ),
++        migrations.CreateModel(
++            name="WbsTemplate",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("name", models.CharField(max_length=150)),
++                (
++                    "project_type",
++                    models.CharField(
++                        choices=[
++                            ("rooftop", "Open Roof (Rooftop)"),
++                            ("ground_mount", "On-Site Solar EPC (Ground-mount)"),
++                        ],
++                        max_length=20,
++                    ),
++                ),
++                ("is_active", models.BooleanField(default=True)),
++                ("is_default", models.BooleanField(default=False)),
++                ("created_at", models.DateTimeField(auto_now_add=True)),
++            ],
++            options={
++                "db_table": "solar_wbs_template",
++                "ordering": ["project_type", "-is_default", "name"],
++            },
++        ),
++        migrations.CreateModel(
++            name="BoqSection",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("order", models.PositiveIntegerField(default=0)),
++                ("name", models.CharField(max_length=150)),
++                ("is_material", models.BooleanField(default=True)),
++                (
++                    "template",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="sections",
++                        to="solar_engine.boqtemplate",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "solar_boq_section",
++                "ordering": ["template", "order", "id"],
++            },
++        ),
++        migrations.CreateModel(
++            name="BoqTemplateItem",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("order", models.PositiveIntegerField(default=0)),
++                ("description", models.CharField(max_length=255)),
++                ("specification", models.TextField(blank=True)),
++                ("unit", models.CharField(default="Nos", max_length=40)),
++                (
++                    "quantity_basis",
++                    models.CharField(
++                        choices=[
++                            ("fixed", "Fixed quantity"),
++                            ("per_mw_ac", "Per MW (AC)"),
++                            ("per_mwp_dc", "Per MWp (DC)"),
++                            ("per_string", "Per string"),
++                            ("per_inverter", "Per inverter"),
++                            ("per_transformer", "Per transformer"),
++                            ("per_acdb", "Per ACDB"),
++                            ("per_module", "Per module"),
++                        ],
++                        default="fixed",
++                        max_length=20,
++                    ),
++                ),
++                (
++                    "quantity_factor",
++                    models.DecimalField(
++                        decimal_places=4, default=Decimal("1"), max_digits=16
++                    ),
++                ),
++                (
++                    "default_material_rate",
++                    models.DecimalField(
++                        decimal_places=2, default=Decimal("0"), max_digits=16
++                    ),
++                ),
++                (
++                    "default_labour_rate",
++                    models.DecimalField(
++                        decimal_places=2, default=Decimal("0"), max_digits=16
++                    ),
++                ),
++                ("wbs_stage_code", models.CharField(blank=True, max_length=30)),
++                (
++                    "section",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="items",
++                        to="solar_engine.boqsection",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "solar_boq_template_item",
++                "ordering": ["section", "order", "id"],
++            },
++        ),
++        migrations.CreateModel(
++            name="ProjectBuild",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                (
++                    "project_type",
++                    models.CharField(
++                        choices=[
++                            ("rooftop", "Open Roof (Rooftop)"),
++                            ("ground_mount", "On-Site Solar EPC (Ground-mount)"),
++                        ],
++                        max_length=20,
++                    ),
++                ),
++                (
++                    "ac_capacity_mw",
++                    models.DecimalField(decimal_places=3, max_digits=10),
++                ),
++                (
++                    "foundation_type",
++                    models.CharField(
++                        blank=True,
++                        choices=[
++                            ("driven_pile", "Driven Pile"),
++                            ("concrete_pedestal", "Concrete Pedestal"),
++                        ],
++                        max_length=30,
++                    ),
++                ),
++                (
++                    "status",
++                    models.CharField(
++                        choices=[
++                            ("draft", "Draft"),
++                            ("locked", "Locked"),
++                            ("in_execution", "In Execution"),
++                            ("completed", "Completed"),
++                        ],
++                        default="draft",
++                        max_length=20,
++                    ),
++                ),
++                ("locked_at", models.DateTimeField(blank=True, null=True)),
++                ("created_at", models.DateTimeField(auto_now_add=True)),
++                ("updated_at", models.DateTimeField(auto_now=True)),
++                (
++                    "boq_template",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.PROTECT,
++                        related_name="builds",
++                        to="solar_engine.boqtemplate",
++                    ),
++                ),
++                (
++                    "created_by",
++                    models.ForeignKey(
++                        blank=True,
++                        null=True,
++                        on_delete=django.db.models.deletion.SET_NULL,
++                        related_name="solar_builds_created",
++                        to=settings.AUTH_USER_MODEL,
++                    ),
++                ),
++                (
++                    "generated_quotation",
++                    models.ForeignKey(
++                        blank=True,
++                        null=True,
++                        on_delete=django.db.models.deletion.SET_NULL,
++                        related_name="solar_builds",
++                        to="purchase_orders.quotation",
++                    ),
++                ),
++                (
++                    "locked_by",
++                    models.ForeignKey(
++                        blank=True,
++                        null=True,
++                        on_delete=django.db.models.deletion.SET_NULL,
++                        related_name="solar_builds_locked",
++                        to=settings.AUTH_USER_MODEL,
++                    ),
++                ),
++                (
++                    "project",
++                    models.OneToOneField(
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="build",
++                        to="core.projectmaster",
++                    ),
++                ),
++                (
++                    "spec_set",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.PROTECT,
++                        related_name="builds",
++                        to="solar_engine.componentspecset",
++                    ),
++                ),
++                (
++                    "wbs_template",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.PROTECT,
++                        related_name="builds",
++                        to="solar_engine.wbstemplate",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "solar_project_build",
++                "ordering": ["-created_at", "-id"],
++            },
++        ),
++        migrations.CreateModel(
++            name="ProjectBoqItem",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("section_name", models.CharField(max_length=150)),
++                ("section_order", models.PositiveIntegerField(default=0)),
++                ("order", models.PositiveIntegerField(default=0)),
++                ("description", models.CharField(max_length=255)),
++                ("specification", models.TextField(blank=True)),
++                ("unit", models.CharField(default="Nos", max_length=40)),
++                (
++                    "quantity",
++                    models.DecimalField(
++                        decimal_places=2, default=Decimal("0"), max_digits=16
++                    ),
++                ),
++                (
++                    "material_rate",
++                    models.DecimalField(
++                        decimal_places=2, default=Decimal("0"), max_digits=16
++                    ),
++                ),
++                (
++                    "labour_rate",
++                    models.DecimalField(
++                        decimal_places=2, default=Decimal("0"), max_digits=16
++                    ),
++                ),
++                ("is_material", models.BooleanField(default=True)),
++                (
++                    "source_item",
++                    models.ForeignKey(
++                        blank=True,
++                        null=True,
++                        on_delete=django.db.models.deletion.SET_NULL,
++                        to="solar_engine.boqtemplateitem",
++                    ),
++                ),
++                (
++                    "build",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="boq_items",
++                        to="solar_engine.projectbuild",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "solar_project_boq_item",
++                "ordering": ["build", "section_order", "order", "id"],
++            },
++        ),
++        migrations.CreateModel(
++            name="ProjectSizing",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                (
++                    "dc_capacity_mwp",
++                    models.DecimalField(
++                        decimal_places=4, default=Decimal("0"), max_digits=12
++                    ),
++                ),
++                ("module_count", models.PositiveIntegerField(default=0)),
++                ("string_count", models.PositiveIntegerField(default=0)),
++                ("inverter_count", models.PositiveIntegerField(default=0)),
++                ("transformer_count", models.PositiveIntegerField(default=0)),
++                ("acdb_count", models.PositiveIntegerField(default=0)),
++                (
++                    "dc_ac_ratio",
++                    models.DecimalField(
++                        decimal_places=3, default=Decimal("0"), max_digits=6
++                    ),
++                ),
++                (
++                    "build",
++                    models.OneToOneField(
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="sizing",
++                        to="solar_engine.projectbuild",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "solar_project_sizing",
++            },
++        ),
++        migrations.CreateModel(
++            name="ProjectStage",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("order", models.PositiveIntegerField(default=0)),
++                ("code", models.CharField(max_length=30)),
++                ("name", models.CharField(max_length=200)),
++                ("description", models.TextField(blank=True)),
++                ("is_parallel", models.BooleanField(default=False)),
++                (
++                    "status",
++                    models.CharField(
++                        choices=[
++                            ("pending", "Pending"),
++                            ("in_progress", "In Progress"),
++                            ("completed", "Completed"),
++                            ("on_hold", "On Hold"),
++                            ("skipped", "Skipped"),
++                        ],
++                        default="pending",
++                        max_length=20,
++                    ),
++                ),
++                ("planned_start", models.DateField(blank=True, null=True)),
++                ("planned_end", models.DateField(blank=True, null=True)),
++                ("actual_start", models.DateField(blank=True, null=True)),
++                ("actual_end", models.DateField(blank=True, null=True)),
++                (
++                    "build",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="stages",
++                        to="solar_engine.projectbuild",
++                    ),
++                ),
++                (
++                    "source_stage",
++                    models.ForeignKey(
++                        blank=True,
++                        null=True,
++                        on_delete=django.db.models.deletion.SET_NULL,
++                        to="solar_engine.wbsstage",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "solar_project_stage",
++                "ordering": ["build", "order", "id"],
++            },
++        ),
++        migrations.AddField(
++            model_name="wbsstage",
++            name="template",
++            field=models.ForeignKey(
++                on_delete=django.db.models.deletion.CASCADE,
++                related_name="stages",
++                to="solar_engine.wbstemplate",
++            ),
++        ),
++        migrations.CreateModel(
++            name="WbsWorkPackage",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("order", models.PositiveIntegerField(default=0)),
++                ("name", models.CharField(max_length=200)),
++                ("discipline", models.CharField(blank=True, max_length=80)),
++                ("notes", models.TextField(blank=True)),
++                (
++                    "core_workpackage",
++                    models.ForeignKey(
++                        blank=True,
++                        null=True,
++                        on_delete=django.db.models.deletion.SET_NULL,
++                        related_name="solar_wbs_packages",
++                        to="core.workpackage",
++                    ),
++                ),
++                (
++                    "stage",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="work_packages",
++                        to="solar_engine.wbsstage",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "solar_wbs_work_package",
++                "ordering": ["stage", "order", "id"],
++            },
++        ),
++        migrations.CreateModel(
++            name="ProjectWorkPackage",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("order", models.PositiveIntegerField(default=0)),
++                ("name", models.CharField(max_length=200)),
++                ("discipline", models.CharField(blank=True, max_length=80)),
++                (
++                    "status",
++                    models.CharField(
++                        choices=[
++                            ("pending", "Pending"),
++                            ("in_progress", "In Progress"),
++                            ("completed", "Completed"),
++                            ("on_hold", "On Hold"),
++                            ("skipped", "Skipped"),
++                        ],
++                        default="pending",
++                        max_length=20,
++                    ),
++                ),
++                ("notes", models.TextField(blank=True)),
++                (
++                    "allocation",
++                    models.ForeignKey(
++                        blank=True,
++                        null=True,
++                        on_delete=django.db.models.deletion.SET_NULL,
++                        related_name="solar_work_packages",
++                        to="core.projectworkallocation",
++                    ),
++                ),
++                (
++                    "stage",
++                    models.ForeignKey(
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="work_packages",
++                        to="solar_engine.projectstage",
++                    ),
++                ),
++                (
++                    "source_wp",
++                    models.ForeignKey(
++                        blank=True,
++                        null=True,
++                        on_delete=django.db.models.deletion.SET_NULL,
++                        to="solar_engine.wbsworkpackage",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "solar_project_work_package",
++                "ordering": ["stage", "order", "id"],
++            },
++        ),
++    ]
+diff --git a/solar_engine/migrations/__init__.py b/solar_engine/migrations/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/solar_engine/models.py b/solar_engine/models.py
+new file mode 100644
+index 0000000..80f0193
+--- /dev/null
++++ b/solar_engine/models.py
+@@ -0,0 +1,294 @@
++from decimal import Decimal
++
++from django.conf import settings
++from django.db import models
++
++from . import constants as C
++
++
++# =========================================================================
++# Template layer — reusable, engineer-editable configuration
++# =========================================================================
++class ComponentSpecSet(models.Model):
++    """Engineering inputs that drive the sizing calculator. The default row
++    carries the 5 MW study-book values and is editable."""
++
++    name = models.CharField(max_length=150, unique=True)
++    is_default = models.BooleanField(default=False)
++    is_active = models.BooleanField(default=True)
++
++    module_wp = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal('550'))
++    modules_per_string = models.PositiveIntegerField(default=26)
++    inverter_kw = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('125'))
++    transformer_mva = models.DecimalField(max_digits=8, decimal_places=3, default=Decimal('2.5'))
++    inverters_per_acdb = models.PositiveIntegerField(default=10)
++    lv_voltage = models.PositiveIntegerField(default=415, help_text='Low-voltage AC, volts')
++    ht_voltage_kv = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('11'))
++    target_dc_ac_ratio = models.DecimalField(max_digits=5, decimal_places=3, default=Decimal('1.200'))
++
++    created_at = models.DateTimeField(auto_now_add=True)
++    updated_at = models.DateTimeField(auto_now=True)
++
++    class Meta:
++        db_table = 'solar_component_spec_set'
++        ordering = ['-is_default', 'name']
++
++    def __str__(self):
++        return self.name
++
++
++class WbsTemplate(models.Model):
++    name = models.CharField(max_length=150)
++    project_type = models.CharField(max_length=20, choices=C.PROJECT_TYPE_CHOICES)
++    is_active = models.BooleanField(default=True)
++    is_default = models.BooleanField(default=False)
++    created_at = models.DateTimeField(auto_now_add=True)
++
++    class Meta:
++        db_table = 'solar_wbs_template'
++        ordering = ['project_type', '-is_default', 'name']
++
++    def __str__(self):
++        return f'{self.name} ({self.get_project_type_display()})'
++
++
++class WbsStage(models.Model):
++    template = models.ForeignKey(WbsTemplate, on_delete=models.CASCADE, related_name='stages')
++    order = models.PositiveIntegerField(default=0)
++    code = models.CharField(max_length=30)
++    name = models.CharField(max_length=200)
++    description = models.TextField(blank=True)
++    is_parallel = models.BooleanField(default=False)
++
++    class Meta:
++        db_table = 'solar_wbs_stage'
++        ordering = ['template', 'order', 'id']
++
++    def __str__(self):
++        return f'{self.code} — {self.name}'
++
++
++class WbsWorkPackage(models.Model):
++    stage = models.ForeignKey(WbsStage, on_delete=models.CASCADE, related_name='work_packages')
++    order = models.PositiveIntegerField(default=0)
++    name = models.CharField(max_length=200)
++    discipline = models.CharField(max_length=80, blank=True)
++    core_workpackage = models.ForeignKey(
++        'core.WorkPackage', on_delete=models.SET_NULL, null=True, blank=True,
++        related_name='solar_wbs_packages',
++    )
++    notes = models.TextField(blank=True)
++
++    class Meta:
++        db_table = 'solar_wbs_work_package'
++        ordering = ['stage', 'order', 'id']
++
++    def __str__(self):
++        return self.name
++
++
++class BoqTemplate(models.Model):
++    name = models.CharField(max_length=150)
++    project_type = models.CharField(max_length=20, choices=C.PROJECT_TYPE_CHOICES)
++    is_active = models.BooleanField(default=True)
++    is_default = models.BooleanField(default=False)
++    created_at = models.DateTimeField(auto_now_add=True)
++
++    class Meta:
++        db_table = 'solar_boq_template'
++        ordering = ['project_type', '-is_default', 'name']
++
++    def __str__(self):
++        return f'{self.name} ({self.get_project_type_display()})'
++
++
++class BoqSection(models.Model):
++    template = models.ForeignKey(BoqTemplate, on_delete=models.CASCADE, related_name='sections')
++    order = models.PositiveIntegerField(default=0)
++    name = models.CharField(max_length=150)
++    # Material sections feed the auto-drafted procurement quotation on lock.
++    is_material = models.BooleanField(default=True)
++
++    class Meta:
++        db_table = 'solar_boq_section'
++        ordering = ['template', 'order', 'id']
++
++    def __str__(self):
++        return self.name
++
++
++class BoqTemplateItem(models.Model):
++    section = models.ForeignKey(BoqSection, on_delete=models.CASCADE, related_name='items')
++    order = models.PositiveIntegerField(default=0)
++    description = models.CharField(max_length=255)
++    specification = models.TextField(blank=True)
++    unit = models.CharField(max_length=40, default='Nos')
++    quantity_basis = models.CharField(max_length=20, choices=C.QUANTITY_BASIS_CHOICES, default=C.BASIS_FIXED)
++    quantity_factor = models.DecimalField(max_digits=16, decimal_places=4, default=Decimal('1'))
++    default_material_rate = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
++    default_labour_rate = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
++    wbs_stage_code = models.CharField(max_length=30, blank=True)
++
++    class Meta:
++        db_table = 'solar_boq_template_item'
++        ordering = ['section', 'order', 'id']
++
++    def __str__(self):
++        return self.description
++
++
++# =========================================================================
++# Project-instance layer — generated per project, then editable
++# =========================================================================
++class ProjectBuild(models.Model):
++    project = models.OneToOneField('core.ProjectMaster', on_delete=models.CASCADE, related_name='build')
++    project_type = models.CharField(max_length=20, choices=C.PROJECT_TYPE_CHOICES)
++    ac_capacity_mw = models.DecimalField(max_digits=10, decimal_places=3)
++    foundation_type = models.CharField(max_length=30, choices=C.FOUNDATION_CHOICES, blank=True)
++
++    spec_set = models.ForeignKey(ComponentSpecSet, on_delete=models.PROTECT, related_name='builds')
++    wbs_template = models.ForeignKey(WbsTemplate, on_delete=models.PROTECT, related_name='builds')
++    boq_template = models.ForeignKey(BoqTemplate, on_delete=models.PROTECT, related_name='builds')
++
++    status = models.CharField(max_length=20, choices=C.BUILD_STATUS_CHOICES, default=C.BUILD_DRAFT)
++    generated_quotation = models.ForeignKey(
++        'purchase_orders.Quotation', on_delete=models.SET_NULL, null=True, blank=True,
++        related_name='solar_builds',
++    )
++
++    created_by = models.ForeignKey(
++        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
++        related_name='solar_builds_created',
++    )
++    locked_by = models.ForeignKey(
++        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
++        related_name='solar_builds_locked',
++    )
++    locked_at = models.DateTimeField(null=True, blank=True)
++    created_at = models.DateTimeField(auto_now_add=True)
++    updated_at = models.DateTimeField(auto_now=True)
++
++    class Meta:
++        db_table = 'solar_project_build'
++        ordering = ['-created_at', '-id']
++
++    def __str__(self):
++        return f'Build for {self.project} ({self.get_project_type_display()})'
++
++    @property
++    def is_editable(self):
++        return self.status == C.BUILD_DRAFT
++
++    @property
++    def boq_totals(self):
++        material = labour = Decimal('0')
++        for item in self.boq_items.all():
++            material += item.material_amount
++            labour += item.labour_amount
++        return {
++            'material_amount': material,
++            'labour_amount': labour,
++            'total_amount': material + labour,
++        }
++
++    @property
++    def progress_percent(self):
++        stages = list(self.stages.exclude(status=C.STATUS_SKIPPED))
++        if not stages:
++            return 0
++        done = sum(1 for s in stages if s.status == C.STATUS_COMPLETED)
++        return round(done * 100 / len(stages))
++
++
++class ProjectSizing(models.Model):
++    build = models.OneToOneField(ProjectBuild, on_delete=models.CASCADE, related_name='sizing')
++    dc_capacity_mwp = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal('0'))
++    module_count = models.PositiveIntegerField(default=0)
++    string_count = models.PositiveIntegerField(default=0)
++    inverter_count = models.PositiveIntegerField(default=0)
++    transformer_count = models.PositiveIntegerField(default=0)
++    acdb_count = models.PositiveIntegerField(default=0)
++    dc_ac_ratio = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal('0'))
++
++    class Meta:
++        db_table = 'solar_project_sizing'
++
++    def __str__(self):
++        return f'Sizing: {self.dc_capacity_mwp} MWp / {self.inverter_count} inverters'
++
++
++class ProjectStage(models.Model):
++    build = models.ForeignKey(ProjectBuild, on_delete=models.CASCADE, related_name='stages')
++    order = models.PositiveIntegerField(default=0)
++    code = models.CharField(max_length=30)
++    name = models.CharField(max_length=200)
++    description = models.TextField(blank=True)
++    is_parallel = models.BooleanField(default=False)
++    status = models.CharField(max_length=20, choices=C.EXECUTION_STATUS_CHOICES, default=C.STATUS_PENDING)
++    planned_start = models.DateField(null=True, blank=True)
++    planned_end = models.DateField(null=True, blank=True)
++    actual_start = models.DateField(null=True, blank=True)
++    actual_end = models.DateField(null=True, blank=True)
++    source_stage = models.ForeignKey(WbsStage, on_delete=models.SET_NULL, null=True, blank=True)
++
++    class Meta:
++        db_table = 'solar_project_stage'
++        ordering = ['build', 'order', 'id']
++
++    def __str__(self):
++        return f'{self.code} — {self.name}'
++
++
++class ProjectWorkPackage(models.Model):
++    stage = models.ForeignKey(ProjectStage, on_delete=models.CASCADE, related_name='work_packages')
++    order = models.PositiveIntegerField(default=0)
++    name = models.CharField(max_length=200)
++    discipline = models.CharField(max_length=80, blank=True)
++    status = models.CharField(max_length=20, choices=C.EXECUTION_STATUS_CHOICES, default=C.STATUS_PENDING)
++    allocation = models.ForeignKey(
++        'core.ProjectWorkAllocation', on_delete=models.SET_NULL, null=True, blank=True,
++        related_name='solar_work_packages',
++    )
++    notes = models.TextField(blank=True)
++    source_wp = models.ForeignKey(WbsWorkPackage, on_delete=models.SET_NULL, null=True, blank=True)
++
++    class Meta:
++        db_table = 'solar_project_work_package'
++        ordering = ['stage', 'order', 'id']
++
++    def __str__(self):
++        return self.name
++
++
++class ProjectBoqItem(models.Model):
++    build = models.ForeignKey(ProjectBuild, on_delete=models.CASCADE, related_name='boq_items')
++    section_name = models.CharField(max_length=150)
++    section_order = models.PositiveIntegerField(default=0)
++    order = models.PositiveIntegerField(default=0)
++    description = models.CharField(max_length=255)
++    specification = models.TextField(blank=True)
++    unit = models.CharField(max_length=40, default='Nos')
++    quantity = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
++    material_rate = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
++    labour_rate = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
++    is_material = models.BooleanField(default=True)
++    source_item = models.ForeignKey(BoqTemplateItem, on_delete=models.SET_NULL, null=True, blank=True)
++
++    class Meta:
++        db_table = 'solar_project_boq_item'
++        ordering = ['build', 'section_order', 'order', 'id']
++
++    def __str__(self):
++        return self.description
++
++    @property
++    def material_amount(self):
++        return (self.quantity or Decimal('0')) * (self.material_rate or Decimal('0'))
++
++    @property
++    def labour_amount(self):
++        return (self.quantity or Decimal('0')) * (self.labour_rate or Decimal('0'))
++
++    @property
++    def total_amount(self):
++        return self.material_amount + self.labour_amount
+diff --git a/solar_engine/seed_data.py b/solar_engine/seed_data.py
+new file mode 100644
+index 0000000..d926f43
+--- /dev/null
++++ b/solar_engine/seed_data.py
+@@ -0,0 +1,185 @@
++"""Seed definitions for the solar engine, derived from the 5 MW Rooftop
++Solar study book. Everything here is a starting point — editable in admin /
++via the template APIs after seeding.
++
++Quantities use a per-unit `basis` + `factor`, so they scale with any project.
++Rates are left at 0 by default (commercial rates are company/tender specific).
++"""
++from . import constants as C
++
++# Component specs — the book's 5 MW training example.
++DEFAULT_SPEC = {
++    'name': 'Study Book Default (5 MW basis)',
++    'is_default': True,
++    'module_wp': '550',
++    'modules_per_string': 26,
++    'inverter_kw': '125',
++    'transformer_mva': '2.5',
++    'inverters_per_acdb': 10,
++    'lv_voltage': 415,
++    'ht_voltage_kv': '11',
++    'target_dc_ac_ratio': '1.200',
++}
++
++# --- WBS stages (code, name, is_parallel, [work packages]) ----------------
++# Shared electrical/control spine; mode-specific survey & civil packages.
++_COMMON_TAIL = [
++    ('MOUNT', 'Mounting & Module Installation', False, [
++        'Mounting structure erection', 'Alignment, torque & bonding',
++        'Module installation', 'String cabling & numbering',
++    ]),
++    ('DCPRE', 'DC Installation & Pre-Commissioning', False, [
++        'DC cabling & routing', 'DC isolators / SPD where required',
++        'Polarity check', 'String Voc measurement', 'Insulation resistance test',
++        'I-V curve & thermography',
++    ]),
++    ('ACHT', 'AC / Transformer / HT', False, [
++        'ACDB installation', 'LT cabling', 'Transformer installation & testing',
++        'HT panel (VCB / CT / PT / relay)', 'PCC & metering',
++    ]),
++    ('SAFE', 'Safety Systems', True, [
++        'Equipment earthing & bonding', 'Earth grid / electrodes',
++        'Lightning protection (air terminal, down conductor)', 'SPD coordination',
++    ]),
++    ('CTRL', 'Monitoring & Control', True, [
++        'SCADA & data logger', 'Weather station', 'Power Plant Controller (PPC)',
++    ]),
++    ('TEST', 'Testing & Commissioning', False, [
++        'AC / transformer / HT tests', 'Pre-commissioning checklist closure',
++        'Energization sequence', 'Grid synchronization', 'Anti-islanding / grid protection',
++    ]),
++    ('PERF', 'Performance Test', False, [
++        'Performance ratio (PR) monitoring', 'Energy (MWh) & availability',
++        'Punch-list closure',
++    ]),
++    ('HAND', 'Handover', False, [
++        'As-built drawings & SLD', 'Test & commissioning reports',
++        'Relay settings & calibration certificates', 'Warranties & O&M manuals',
++        'Training & signed handover',
++    ]),
++    ('OANDM', 'O&M', False, [
++        'Scheduled preventive maintenance', 'Performance monitoring', 'Spares management',
++    ]),
++]
++
++_DESIGN_PROC = [
++    ('ENGG', 'Engineering & Design', False, [
++        'SLD & electrical design', 'Module / string / inverter layout',
++        'AC & cable route layout', 'Earthing & lightning layout', 'HT layout',
++        'SCADA / network architecture', 'IFC drawing revision control',
++    ]),
++    ('APPR', 'Approvals', False, [
++        'Structural / civil approval', 'Utility / grid SLD approval', 'Metering approval',
++    ]),
++    ('PROC', 'Procurement & Inspection', False, [
++        'Modules & structure', 'Inverter, cables & ACDB', 'Transformer & HT panel',
++        'Metering, earthing, LPS & SCADA', 'Material receipt / NCR records',
++    ]),
++]
++
++WBS_ROOFTOP = [
++    ('SURVEY', 'Survey & Feasibility', False, [
++        'Roof area, type & condition survey', 'Obstacle & shadow analysis',
++        'Existing LT/HT & cable-route identification', 'Structural / roof-load survey',
++        'Usable shadow-free area & feasibility',
++    ]),
++] + _DESIGN_PROC + [
++    ('ROOFPREP', 'Mobilization & Roof Preparation', False, [
++        'Site mobilization', 'Roof preparation & cleaning',
++        'Waterproofing & penetration treatment', 'Ballast / fixing arrangement',
++    ]),
++] + _COMMON_TAIL
++
++WBS_GROUND = [
++    ('SURVEY', 'Survey & Feasibility', False, [
++        'Topographical / land survey', 'Soil resistivity test (Wenner four-point)',
++        'Shadow analysis & row spacing', 'Geotechnical / pile-load assessment',
++        'Usable area & feasibility',
++    ]),
++] + _DESIGN_PROC + [
++    ('CIVIL', 'Mobilization & Civil Works', False, [
++        'Site mobilization & levelling', 'Pile foundations / pedestals',
++        'Module table / seasonal-tilt structure', 'Cable trenching & ducting',
++        'Internal roads, drainage & boundary', 'Control room / security',
++    ]),
++] + _COMMON_TAIL
++
++
++# --- BOQ sections -> items -------------------------------------------------
++# item = (description, unit, basis, factor, spec_note)
++def _common_boq_sections(project_type):
++    structure_items = (
++        [('Module mounting structure (rooftop, galvanised)', 'MWp', C.BASIS_PER_MWP_DC, '1', 'Elevated/ballasted roof structure')]
++        if project_type == C.PROJECT_TYPE_ROOFTOP else
++        [
++            ('Ground-mount module table structure', 'MWp', C.BASIS_PER_MWP_DC, '1', 'Fixed-tilt / seasonal-tilt tables'),
++            ('Pile foundation / pedestal', 'Nos', C.BASIS_PER_STRING, '2', 'Per-table foundation count (seed; refine from layout)'),
++        ]
++    )
++    civil_section = (
++        ('Roof Civil & Waterproofing', False, [
++            ('Roof preparation & cleaning', 'MWp', C.BASIS_PER_MWP_DC, '1', ''),
++            ('Waterproofing & penetration treatment', 'MWp', C.BASIS_PER_MWP_DC, '1', ''),
++        ])
++        if project_type == C.PROJECT_TYPE_ROOFTOP else
++        ('Site Civil Works', False, [
++            ('Land levelling & grading', 'MW', C.BASIS_PER_MW_AC, '1', ''),
++            ('Cable trenching & ducting', 'MWp', C.BASIS_PER_MWP_DC, '1', ''),
++            ('Internal roads, drainage & boundary', 'MW', C.BASIS_PER_MW_AC, '1', ''),
++        ])
++    )
++    return [
++        # (section_name, is_material, [items])
++        ('PV Modules', True, [
++            ('Solar PV module', 'Nos', C.BASIS_PER_MODULE, '1', '550 Wp (per spec set)'),
++        ]),
++        ('Mounting Structure', True, structure_items),
++        ('DC System', True, [
++            ('DC string cable set (1C x 4/6 sq.mm)', 'MWp', C.BASIS_PER_MWP_DC, '3000', 'Length seed per MWp — refine from layout'),
++            ('DC connectors (pairs)', 'Nos', C.BASIS_PER_STRING, '2', ''),
++            ('DC SPD / isolator (where required)', 'Nos', C.BASIS_PER_INVERTER, '1', ''),
++        ]),
++        ('Inverters', True, [
++            ('String/central inverter', 'Nos', C.BASIS_PER_INVERTER, '1', '125 kW (per spec set)'),
++        ]),
++        ('AC System', True, [
++            ('ACDB', 'Nos', C.BASIS_PER_ACDB, '1', ''),
++            ('LT cable (inverter to transformer)', 'MW', C.BASIS_PER_MW_AC, '400', 'Length seed per MW'),
++            ('AC SPD', 'Nos', C.BASIS_PER_ACDB, '1', ''),
++        ]),
++        ('Transformer', True, [
++            ('Step-up transformer', 'Nos', C.BASIS_PER_TRANSFORMER, '1', '2.5 MVA, 415V/11kV (per spec set)'),
++        ]),
++        ('HT System', True, [
++            ('HT VCB (incomer / outgoing / bus-coupler)', 'Nos', C.BASIS_FIXED, '4', 'Refine from approved SLD'),
++            ('CT / PT / VT set', 'Set', C.BASIS_PER_TRANSFORMER, '1', ''),
++            ('Protection relay', 'Nos', C.BASIS_PER_TRANSFORMER, '1', '50/51, 50N/51N etc.'),
++            ('HT metering set (PCC)', 'Set', C.BASIS_FIXED, '1', ''),
++        ]),
++        ('Earthing', True, [
++            ('Earth pit / electrode', 'Nos', C.BASIS_PER_MW_AC, '8', 'Seed; finalise from soil resistivity & study'),
++            ('Earthing strip / conductor', 'MW', C.BASIS_PER_MW_AC, '500', 'Length seed per MW'),
++        ]),
++        ('Lightning Protection', True, [
++            ('Air terminal & down conductor set', 'Nos', C.BASIS_PER_MW_AC, '2', ''),
++        ]),
++        ('SCADA / PPC & Weather', True, [
++            ('SCADA & data logger', 'Set', C.BASIS_FIXED, '1', ''),
++            ('Weather station (pyranometer, temp, wind)', 'Set', C.BASIS_FIXED, '1', ''),
++            ('Power Plant Controller (PPC)', 'Set', C.BASIS_FIXED, '1', ''),
++        ]),
++        ('Cable Trays & Accessories', True, [
++            ('Cable tray & accessories', 'MWp', C.BASIS_PER_MWP_DC, '1', ''),
++        ]),
++        civil_section,
++        ('Testing & Commissioning', False, [
++            ('Testing & commissioning (services)', 'MW', C.BASIS_PER_MW_AC, '1', ''),
++        ]),
++        ('Engineering & Documentation', False, [
++            ('Engineering, drawings & documentation', 'MW', C.BASIS_PER_MW_AC, '1', ''),
++        ]),
++    ]
++
++
++BOQ_ROOFTOP = _common_boq_sections(C.PROJECT_TYPE_ROOFTOP)
++BOQ_GROUND = _common_boq_sections(C.PROJECT_TYPE_GROUND)
+diff --git a/solar_engine/serializers.py b/solar_engine/serializers.py
+new file mode 100644
+index 0000000..a68eb90
+--- /dev/null
++++ b/solar_engine/serializers.py
+@@ -0,0 +1,113 @@
++"""Plain-dict serializers (matches the app's existing JsonResponse style)."""
++
++
++def serialize_sizing(sizing):
++    if not sizing:
++        return None
++    return {
++        'dc_capacity_mwp': str(sizing.dc_capacity_mwp),
++        'module_count': sizing.module_count,
++        'string_count': sizing.string_count,
++        'inverter_count': sizing.inverter_count,
++        'transformer_count': sizing.transformer_count,
++        'acdb_count': sizing.acdb_count,
++        'dc_ac_ratio': str(sizing.dc_ac_ratio),
++    }
++
++
++def serialize_work_package(wp):
++    return {
++        'id': wp.id,
++        'name': wp.name,
++        'discipline': wp.discipline,
++        'status': wp.status,
++        'allocation_id': wp.allocation_id,
++        'notes': wp.notes,
++    }
++
++
++def serialize_stage(stage):
++    return {
++        'id': stage.id,
++        'order': stage.order,
++        'code': stage.code,
++        'name': stage.name,
++        'description': stage.description,
++        'is_parallel': stage.is_parallel,
++        'status': stage.status,
++        'planned_start': stage.planned_start.isoformat() if stage.planned_start else '',
++        'planned_end': stage.planned_end.isoformat() if stage.planned_end else '',
++        'actual_start': stage.actual_start.isoformat() if stage.actual_start else '',
++        'actual_end': stage.actual_end.isoformat() if stage.actual_end else '',
++        'work_packages': [serialize_work_package(wp) for wp in stage.work_packages.all()],
++    }
++
++
++def serialize_boq_item(item):
++    return {
++        'id': item.id,
++        'section_name': item.section_name,
++        'section_order': item.section_order,
++        'order': item.order,
++        'description': item.description,
++        'specification': item.specification,
++        'unit': item.unit,
++        'quantity': str(item.quantity),
++        'material_rate': str(item.material_rate),
++        'labour_rate': str(item.labour_rate),
++        'is_material': item.is_material,
++        'material_amount': str(item.material_amount),
++        'labour_amount': str(item.labour_amount),
++        'total_amount': str(item.total_amount),
++    }
++
++
++def serialize_boq_grouped(build):
++    """BOQ items grouped by section, with section + grand totals."""
++    sections = {}
++    for item in build.boq_items.all():
++        sec = sections.setdefault(item.section_name, {
++            'name': item.section_name, 'order': item.section_order,
++            'items': [], 'material_amount': 0, 'labour_amount': 0, 'total_amount': 0,
++        })
++        sec['items'].append(serialize_boq_item(item))
++        sec['material_amount'] += float(item.material_amount)
++        sec['labour_amount'] += float(item.labour_amount)
++        sec['total_amount'] += float(item.total_amount)
++    ordered = sorted(sections.values(), key=lambda s: s['order'])
++    for s in ordered:
++        s['material_amount'] = f"{s['material_amount']:.2f}"
++        s['labour_amount'] = f"{s['labour_amount']:.2f}"
++        s['total_amount'] = f"{s['total_amount']:.2f}"
++    return ordered
++
++
++def serialize_build(build, detail=True):
++    totals = build.boq_totals
++    data = {
++        'id': build.id,
++        'project_id': build.project_id,
++        'project_code': getattr(build.project, 'project_code', ''),
++        'project_name': getattr(build.project, 'project_name', ''),
++        'project_type': build.project_type,
++        'project_type_display': build.get_project_type_display(),
++        'ac_capacity_mw': str(build.ac_capacity_mw),
++        'foundation_type': build.foundation_type,
++        'status': build.status,
++        'status_display': build.get_status_display(),
++        'is_editable': build.is_editable,
++        'progress_percent': build.progress_percent,
++        'generated_quotation_id': build.generated_quotation_id,
++        'spec_set': build.spec_set.name,
++        'locked_at': build.locked_at.isoformat() if build.locked_at else '',
++        'boq_totals': {
++            'material_amount': str(totals['material_amount']),
++            'labour_amount': str(totals['labour_amount']),
++            'total_amount': str(totals['total_amount']),
++        },
++        'sizing': serialize_sizing(getattr(build, 'sizing', None)),
++    }
++    if detail:
++        data['stages'] = [serialize_stage(s) for s in build.stages.all()]
++        data['boq_sections'] = serialize_boq_grouped(build)
++    return data
+diff --git a/solar_engine/services.py b/solar_engine/services.py
+new file mode 100644
+index 0000000..7302010
+--- /dev/null
++++ b/solar_engine/services.py
+@@ -0,0 +1,235 @@
++"""Core engine: sizing calculator, template instantiation, lock & the
++auto-drafted procurement quotation.
++
++Design: templates are the source of truth (config-driven). Sizing produces
++*seed* values that reproduce the 5 MW study book; every seeded value stays
++editable until the build is locked.
++"""
++import math
++from decimal import Decimal, ROUND_HALF_UP
++
++from django.core.exceptions import PermissionDenied
++from django.db import transaction
++from django.utils import timezone
++
++from permissions.constants import ROLE_PROJECT_MANAGER
++from permissions.utils import get_user_role, is_admin_like
++
++from . import constants as C
++from .models import (
++    BoqTemplate,
++    ComponentSpecSet,
++    ProjectBoqItem,
++    ProjectBuild,
++    ProjectSizing,
++    ProjectStage,
++    ProjectWorkPackage,
++    WbsTemplate,
++)
++
++
++class EngineError(Exception):
++    """Recoverable engine failure surfaced to callers as a 400."""
++
++
++def _d(value):
++    return Decimal(str(value))
++
++
++# --- Permissions ----------------------------------------------------------
++def can_lock_build(user):
++    """Super admin / admin (covered by is_admin_like) or project manager."""
++    if is_admin_like(user):
++        return True
++    return get_user_role(user) == ROLE_PROJECT_MANAGER
++
++
++# --- Sizing calculator ----------------------------------------------------
++def compute_sizing(ac_mw, spec):
++    """Reproduce the study book from AC capacity + component specs.
++
++    5 MW defaults → 40 inverters, 420 strings, 10,920 modules, 6.006 MWp,
++    2 transformers, 4 ACDB.
++    """
++    ac_mw = _d(ac_mw)
++    if ac_mw <= 0:
++        raise EngineError('AC capacity must be greater than zero.')
++
++    module_wp = _d(spec.module_wp)
++    per_string = int(spec.modules_per_string)
++    inverter_kw = _d(spec.inverter_kw)
++    transformer_mva = _d(spec.transformer_mva)
++    per_acdb = max(int(spec.inverters_per_acdb), 1)
++    ratio = _d(spec.target_dc_ac_ratio)
++
++    inverter_count = math.ceil(ac_mw * 1000 / inverter_kw)
++
++    dc_target_mwp = ac_mw * ratio
++    modules_needed = math.ceil(dc_target_mwp * 1_000_000 / module_wp)
++    string_count = int(Decimal(modules_needed / per_string).quantize(Decimal('1'), rounding=ROUND_HALF_UP)) if per_string else 0
++    string_count = max(string_count, 1)
++    module_count = string_count * per_string
++
++    dc_capacity_mwp = (_d(module_count) * module_wp) / _d(1_000_000)
++    dc_ac_ratio = dc_capacity_mwp / ac_mw
++    transformer_count = math.ceil(ac_mw / transformer_mva) if transformer_mva > 0 else 0
++    acdb_count = math.ceil(inverter_count / per_acdb)
++
++    return {
++        'dc_capacity_mwp': dc_capacity_mwp.quantize(Decimal('0.0001')),
++        'module_count': module_count,
++        'string_count': string_count,
++        'inverter_count': inverter_count,
++        'transformer_count': transformer_count,
++        'acdb_count': acdb_count,
++        'dc_ac_ratio': dc_ac_ratio.quantize(Decimal('0.001')),
++    }
++
++
++def _basis_value(basis, ac_mw, sizing):
++    return {
++        C.BASIS_FIXED: Decimal('1'),
++        C.BASIS_PER_MW_AC: _d(ac_mw),
++        C.BASIS_PER_MWP_DC: _d(sizing['dc_capacity_mwp']),
++        C.BASIS_PER_STRING: _d(sizing['string_count']),
++        C.BASIS_PER_INVERTER: _d(sizing['inverter_count']),
++        C.BASIS_PER_TRANSFORMER: _d(sizing['transformer_count']),
++        C.BASIS_PER_ACDB: _d(sizing['acdb_count']),
++        C.BASIS_PER_MODULE: _d(sizing['module_count']),
++    }.get(basis, Decimal('1'))
++
++
++# --- Default template resolution -----------------------------------------
++def _default_spec_set():
++    spec = ComponentSpecSet.objects.filter(is_default=True, is_active=True).first()
++    if not spec:
++        raise EngineError('No default component spec set. Run seed_solar_templates.')
++    return spec
++
++
++def _default_wbs_template(project_type):
++    tpl = WbsTemplate.objects.filter(project_type=project_type, is_active=True).order_by('-is_default', 'id').first()
++    if not tpl:
++        raise EngineError(f'No active WBS template for {project_type}. Run seed_solar_templates.')
++    return tpl
++
++
++def _default_boq_template(project_type):
++    tpl = BoqTemplate.objects.filter(project_type=project_type, is_active=True).order_by('-is_default', 'id').first()
++    if not tpl:
++        raise EngineError(f'No active BOQ template for {project_type}. Run seed_solar_templates.')
++    return tpl
++
++
++# --- Instantiation --------------------------------------------------------
++@transaction.atomic
++def instantiate_build(project, project_type, ac_mw, spec_set=None,
++                      foundation_type='', wbs_template=None, boq_template=None, user=None):
++    """Create a ProjectBuild for `project`: sizing + WBS stages/packages +
++    seeded BOQ. One non-cancelled build per project."""
++    if project_type not in dict(C.PROJECT_TYPE_CHOICES):
++        raise EngineError('Invalid project type.')
++    if ProjectBuild.objects.filter(project=project).exists():
++        raise EngineError('This project already has a work-structure build.')
++
++    spec_set = spec_set or _default_spec_set()
++    wbs_template = wbs_template or _default_wbs_template(project_type)
++    boq_template = boq_template or _default_boq_template(project_type)
++    if project_type == C.PROJECT_TYPE_GROUND and not foundation_type:
++        foundation_type = C.FOUNDATION_PILE
++
++    build = ProjectBuild.objects.create(
++        project=project,
++        project_type=project_type,
++        ac_capacity_mw=_d(ac_mw),
++        foundation_type=foundation_type if project_type == C.PROJECT_TYPE_GROUND else '',
++        spec_set=spec_set,
++        wbs_template=wbs_template,
++        boq_template=boq_template,
++        created_by=user if getattr(user, 'is_authenticated', False) else None,
++    )
++
++    sizing = compute_sizing(ac_mw, spec_set)
++    ProjectSizing.objects.create(build=build, **sizing)
++
++    # Copy WBS stages + work packages
++    for stage in wbs_template.stages.all().prefetch_related('work_packages'):
++        p_stage = ProjectStage.objects.create(
++            build=build, order=stage.order, code=stage.code, name=stage.name,
++            description=stage.description, is_parallel=stage.is_parallel, source_stage=stage,
++        )
++        ProjectWorkPackage.objects.bulk_create([
++            ProjectWorkPackage(
++                stage=p_stage, order=wp.order, name=wp.name, discipline=wp.discipline,
++                allocation=None, notes=wp.notes, source_wp=wp,
++            )
++            for wp in stage.work_packages.all()
++        ])
++
++    # Seed BOQ from template, quantities scaled by basis
++    boq_rows = []
++    for section in boq_template.sections.all().prefetch_related('items'):
++        for item in section.items.all():
++            qty = (item.quantity_factor * _basis_value(item.quantity_basis, ac_mw, sizing))
++            qty = qty.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
++            boq_rows.append(ProjectBoqItem(
++                build=build, section_name=section.name, section_order=section.order,
++                order=item.order, description=item.description, specification=item.specification,
++                unit=item.unit, quantity=qty, material_rate=item.default_material_rate,
++                labour_rate=item.default_labour_rate, is_material=section.is_material,
++                source_item=item,
++            ))
++    ProjectBoqItem.objects.bulk_create(boq_rows)
++    return build
++
++
++# --- Auto-drafted procurement quotation -----------------------------------
++@transaction.atomic
++def generate_quotation_from_boq(build, user=None):
++    """Draft a purchase_orders.Quotation from the build's material BOQ lines."""
++    from purchase_orders.models import Quotation, QuotationItem
++
++    if build.generated_quotation_id:
++        return build.generated_quotation
++
++    project = build.project
++    quotation = Quotation.objects.create(
++        client_name=getattr(project, 'client_name', '') or '',
++        sender_name='',
++        created_by=user if getattr(user, 'is_authenticated', False) else None,
++    )
++
++    items = []
++    for boq in build.boq_items.filter(is_material=True):
++        qty = int((boq.quantity or Decimal('0')).to_integral_value(rounding=ROUND_HALF_UP))
++        if qty <= 0:
++            continue
++        items.append(QuotationItem(
++            quotation=quotation,
++            material_name=boq.description[:255],
++            unit=boq.unit or 'Nos',
++            quantity=qty,
++        ))
++    QuotationItem.objects.bulk_create(items)
++
++    build.generated_quotation = quotation
++    build.save(update_fields=['generated_quotation', 'updated_at'])
++    return quotation
++
++
++@transaction.atomic
++def lock_build(build, user):
++    """Lock a draft build (freezes structure) and auto-draft the procurement
++    quotation. Restricted to super admin / admin / project manager."""
++    if not can_lock_build(user):
++        raise PermissionDenied('Only an admin or project manager can lock a build.')
++    if build.status != C.BUILD_DRAFT:
++        raise EngineError('Only a draft build can be locked.')
++
++    build.status = C.BUILD_LOCKED
++    build.locked_by = user if getattr(user, 'is_authenticated', False) else None
++    build.locked_at = timezone.now()
++    build.save(update_fields=['status', 'locked_by', 'locked_at', 'updated_at'])
++
++    quotation = generate_quotation_from_boq(build, user=user)
++    return build, quotation
+diff --git a/solar_engine/tests.py b/solar_engine/tests.py
+new file mode 100644
+index 0000000..bf30f56
+--- /dev/null
++++ b/solar_engine/tests.py
+@@ -0,0 +1,111 @@
++from decimal import Decimal
++
++from django.contrib.auth.models import User
++from django.core.management import call_command
++from django.test import TestCase
++from django.urls import reverse
++
++from accounts.models import StaffProfile
++from core.models import ProjectMaster
++from permissions.constants import ROLE_PROJECT_MANAGER, ROLE_SITE_STAFF
++
++from . import constants as C
++from . import services
++from .models import ComponentSpecSet, ProjectBuild
++
++
++class SizingCalculatorTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        call_command('seed_solar_templates')
++        cls.spec = ComponentSpecSet.objects.get(is_default=True)
++
++    def test_reproduces_5mw_study_book(self):
++        sizing = services.compute_sizing(Decimal('5'), self.spec)
++        self.assertEqual(sizing['inverter_count'], 40)
++        self.assertEqual(sizing['string_count'], 420)
++        self.assertEqual(sizing['module_count'], 10920)
++        self.assertEqual(sizing['transformer_count'], 2)
++        self.assertEqual(sizing['acdb_count'], 4)
++        self.assertEqual(sizing['dc_capacity_mwp'], Decimal('6.0060'))
++
++    def test_scales_to_1mw(self):
++        sizing = services.compute_sizing(Decimal('1'), self.spec)
++        self.assertEqual(sizing['inverter_count'], 8)   # ceil(1000/125)
++        self.assertEqual(sizing['transformer_count'], 1)  # ceil(1/2.5)
++
++    def test_zero_capacity_rejected(self):
++        with self.assertRaises(services.EngineError):
++            services.compute_sizing(Decimal('0'), self.spec)
++
++
++class InstantiationTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        call_command('seed_solar_templates')
++
++    def test_instantiate_rooftop_build(self):
++        project = ProjectMaster.objects.create(project_name='RT 5MW', total_mw=Decimal('5'))
++        build = services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
++        self.assertEqual(build.sizing.inverter_count, 40)
++        self.assertTrue(build.stages.count() >= 10)
++        self.assertTrue(build.boq_items.count() > 0)
++        # PV module line seeds to module_count
++        module_line = build.boq_items.filter(description__icontains='PV module').first()
++        self.assertEqual(module_line.quantity, Decimal('10920.00'))
++
++    def test_ground_mount_defaults_to_pile(self):
++        project = ProjectMaster.objects.create(project_name='GM 10MW', total_mw=Decimal('10'))
++        build = services.instantiate_build(project, C.PROJECT_TYPE_GROUND, Decimal('10'))
++        self.assertEqual(build.foundation_type, C.FOUNDATION_PILE)
++
++    def test_one_build_per_project(self):
++        project = ProjectMaster.objects.create(project_name='Dup', total_mw=Decimal('5'))
++        services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
++        with self.assertRaises(services.EngineError):
++            services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
++
++
++class LockAndQuotationTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        call_command('seed_solar_templates')
++
++    def _staff(self, username, role):
++        user = User.objects.create_user(username=username, password='x')
++        StaffProfile.objects.create(user=user, staff_name=username, employee_id=username.upper(), role=role)
++        return user
++
++    def test_project_manager_can_lock_and_drafts_quotation(self):
++        pm = self._staff('pm', ROLE_PROJECT_MANAGER)
++        project = ProjectMaster.objects.create(project_name='Lockable', client_name='ACME', total_mw=Decimal('5'))
++        build = services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
++        build, quotation = services.lock_build(build, pm)
++        self.assertEqual(build.status, C.BUILD_LOCKED)
++        self.assertIsNotNone(quotation)
++        self.assertTrue(quotation.items.count() > 0)
++        self.assertEqual(build.generated_quotation_id, quotation.id)
++
++    def test_site_staff_cannot_lock(self):
++        staff = self._staff('site', ROLE_SITE_STAFF)
++        project = ProjectMaster.objects.create(project_name='NoLock', total_mw=Decimal('5'))
++        build = services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
++        from django.core.exceptions import PermissionDenied
++        with self.assertRaises(PermissionDenied):
++            services.lock_build(build, staff)
++
++
++class AuthTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        call_command('seed_solar_templates')
++        cls.project = ProjectMaster.objects.create(project_name='Auth', total_mw=Decimal('5'))
++
++    def test_build_endpoint_requires_login(self):
++        url = reverse('solar-project-build', kwargs={'project_id': self.project.id})
++        resp = self.client.get(url)
++        self.assertIn(resp.status_code, (302, 401, 403))
++
++    def test_templates_endpoint_requires_login(self):
++        resp = self.client.get(reverse('solar-templates'))
++        self.assertIn(resp.status_code, (302, 401, 403))
+diff --git a/solar_engine/urls.py b/solar_engine/urls.py
+new file mode 100644
+index 0000000..925bc68
+--- /dev/null
++++ b/solar_engine/urls.py
+@@ -0,0 +1,12 @@
++from django.urls import path
++
++from . import views
++
++urlpatterns = [
++    path('templates/', views.templates_list_view, name='solar-templates'),
++    path('projects/<int:project_id>/build/', views.project_build_view, name='solar-project-build'),
++    path('builds/<int:build_id>/lock/', views.build_lock_view, name='solar-build-lock'),
++    path('builds/<int:build_id>/sizing/', views.sizing_update_view, name='solar-build-sizing'),
++    path('boq-items/<int:item_id>/', views.boq_item_update_view, name='solar-boq-item'),
++    path('workpackages/<int:wp_id>/', views.workpackage_update_view, name='solar-workpackage'),
++]
+diff --git a/solar_engine/views.py b/solar_engine/views.py
+new file mode 100644
+index 0000000..f1d6fe9
+--- /dev/null
++++ b/solar_engine/views.py
+@@ -0,0 +1,198 @@
++import json
++from decimal import Decimal, InvalidOperation
++
++from django.core.exceptions import PermissionDenied
++from django.http import JsonResponse
++from django.shortcuts import get_object_or_404
++from django.views.decorators.csrf import ensure_csrf_cookie
++
++from core.models import ProjectMaster
++from permissions.utils import require_authenticated
++
++from . import constants as C
++from . import services
++from .models import ComponentSpecSet, ProjectBoqItem, ProjectBuild, ProjectWorkPackage, WbsTemplate, BoqTemplate
++from .serializers import serialize_build, serialize_boq_item, serialize_work_package, serialize_sizing
++
++
++def _body(request):
++    if request.content_type and 'application/json' in request.content_type:
++        try:
++            return json.loads(request.body or '{}')
++        except (ValueError, TypeError):
++            return {}
++    return request.POST
++
++
++def _auth(request):
++    """Return a redirect/None auth gate; all endpoints require login (BP-1/BP-4)."""
++    return require_authenticated(request)
++
++
++@ensure_csrf_cookie
++def project_build_view(request, project_id):
++    """GET  → the project's build (sizing, WBS, BOQ).
++    POST → instantiate a build: {project_type, ac_capacity_mw, spec_set_id?, foundation_type?}.
++    """
++    redirect = _auth(request)
++    if redirect:
++        return redirect
++    project = get_object_or_404(ProjectMaster, pk=project_id)
++
++    if request.method == 'GET':
++        build = ProjectBuild.objects.filter(project=project).first()
++        if not build:
++            return JsonResponse({'build': None}, status=200)
++        return JsonResponse({'build': serialize_build(build)})
++
++    if request.method == 'POST':
++        data = _body(request)
++        project_type = (data.get('project_type') or '').strip()
++        try:
++            ac_mw = Decimal(str(data.get('ac_capacity_mw') or project.total_mw or '0'))
++        except (InvalidOperation, TypeError):
++            return JsonResponse({'error': 'Invalid ac_capacity_mw.'}, status=400)
++
++        spec_set = None
++        if data.get('spec_set_id'):
++            spec_set = ComponentSpecSet.objects.filter(pk=data['spec_set_id'], is_active=True).first()
++            if not spec_set:
++                return JsonResponse({'error': 'Spec set not found.'}, status=400)
++
++        try:
++            build = services.instantiate_build(
++                project=project, project_type=project_type, ac_mw=ac_mw,
++                spec_set=spec_set, foundation_type=(data.get('foundation_type') or ''),
++                user=request.user,
++            )
++        except services.EngineError as exc:
++            return JsonResponse({'error': str(exc)}, status=400)
++        return JsonResponse({'message': 'Work structure generated.', 'build': serialize_build(build)}, status=201)
++
++    return JsonResponse({'error': 'GET or POST required'}, status=405)
++
++
++def build_lock_view(request, build_id):
++    redirect = _auth(request)
++    if redirect:
++        return redirect
++    if request.method != 'POST':
++        return JsonResponse({'error': 'POST required'}, status=405)
++    build = get_object_or_404(ProjectBuild, pk=build_id)
++    try:
++        build, quotation = services.lock_build(build, request.user)
++    except PermissionDenied as exc:
++        return JsonResponse({'error': str(exc)}, status=403)
++    except services.EngineError as exc:
++        return JsonResponse({'error': str(exc)}, status=400)
++    return JsonResponse({
++        'message': 'Build locked and procurement quotation drafted.',
++        'build': serialize_build(build),
++        'quotation_id': quotation.id if quotation else None,
++        'quotation_number': quotation.quotation_number if quotation else None,
++    })
++
++
++def sizing_update_view(request, build_id):
++    redirect = _auth(request)
++    if redirect:
++        return redirect
++    if request.method not in ('POST', 'PATCH'):
++        return JsonResponse({'error': 'POST/PATCH required'}, status=405)
++    build = get_object_or_404(ProjectBuild, pk=build_id)
++    if not build.is_editable:
++        return JsonResponse({'error': 'Build is locked and cannot be edited.'}, status=400)
++    sizing = build.sizing
++    data = _body(request)
++    int_fields = ['module_count', 'string_count', 'inverter_count', 'transformer_count', 'acdb_count']
++    dec_fields = ['dc_capacity_mwp', 'dc_ac_ratio']
++    try:
++        for f in int_fields:
++            if f in data:
++                setattr(sizing, f, int(data[f]))
++        for f in dec_fields:
++            if f in data:
++                setattr(sizing, f, Decimal(str(data[f])))
++    except (ValueError, InvalidOperation):
++        return JsonResponse({'error': 'Invalid sizing value.'}, status=400)
++    sizing.save()
++    return JsonResponse({'message': 'Sizing updated.', 'sizing': serialize_sizing(sizing)})
++
++
++def boq_item_update_view(request, item_id):
++    redirect = _auth(request)
++    if redirect:
++        return redirect
++    if request.method not in ('POST', 'PATCH'):
++        return JsonResponse({'error': 'POST/PATCH required'}, status=405)
++    item = get_object_or_404(ProjectBoqItem, pk=item_id)
++    if not item.build.is_editable:
++        return JsonResponse({'error': 'Build is locked and cannot be edited.'}, status=400)
++    data = _body(request)
++    try:
++        if 'quantity' in data:
++            item.quantity = Decimal(str(data['quantity']))
++        if 'material_rate' in data:
++            item.material_rate = Decimal(str(data['material_rate']))
++        if 'labour_rate' in data:
++            item.labour_rate = Decimal(str(data['labour_rate']))
++    except (InvalidOperation, TypeError):
++        return JsonResponse({'error': 'Invalid numeric value.'}, status=400)
++    for f in ('description', 'specification', 'unit'):
++        if f in data:
++            setattr(item, f, str(data[f]))
++    item.save()
++    return JsonResponse({'message': 'BOQ item updated.', 'item': serialize_boq_item(item)})
++
++
++def workpackage_update_view(request, wp_id):
++    redirect = _auth(request)
++    if redirect:
++        return redirect
++    if request.method not in ('POST', 'PATCH'):
++        return JsonResponse({'error': 'POST/PATCH required'}, status=405)
++    wp = get_object_or_404(ProjectWorkPackage, pk=wp_id)
++    data = _body(request)
++    if 'status' in data:
++        if data['status'] not in dict(C.EXECUTION_STATUS_CHOICES):
++            return JsonResponse({'error': 'Invalid status.'}, status=400)
++        wp.status = data['status']
++    if 'notes' in data:
++        wp.notes = str(data['notes'])
++    if 'allocation_id' in data:
++        wp.allocation_id = data['allocation_id'] or None
++    wp.save()
++    return JsonResponse({'message': 'Work package updated.', 'work_package': serialize_work_package(wp)})
++
++
++def templates_list_view(request):
++    redirect = _auth(request)
++    if redirect:
++        return redirect
++    if request.method != 'GET':
++        return JsonResponse({'error': 'GET required'}, status=405)
++    mode = (request.GET.get('mode') or '').strip()
++    wbs = WbsTemplate.objects.filter(is_active=True)
++    boq = BoqTemplate.objects.filter(is_active=True)
++    if mode:
++        wbs = wbs.filter(project_type=mode)
++        boq = boq.filter(project_type=mode)
++    return JsonResponse({
++        'component_specs': [
++            {'id': s.id, 'name': s.name, 'is_default': s.is_default,
++             'module_wp': str(s.module_wp), 'modules_per_string': s.modules_per_string,
++             'inverter_kw': str(s.inverter_kw), 'transformer_mva': str(s.transformer_mva),
++             'target_dc_ac_ratio': str(s.target_dc_ac_ratio)}
++            for s in ComponentSpecSet.objects.filter(is_active=True)
++        ],
++        'wbs_templates': [
++            {'id': t.id, 'name': t.name, 'project_type': t.project_type, 'is_default': t.is_default}
++            for t in wbs
++        ],
++        'boq_templates': [
++            {'id': t.id, 'name': t.name, 'project_type': t.project_type, 'is_default': t.is_default}
++            for t in boq
++        ],
++        'project_types': [{'value': v, 'label': l} for v, l in C.PROJECT_TYPE_CHOICES],
++        'foundation_types': [{'value': v, 'label': l} for v, l in C.FOUNDATION_CHOICES],
++    })
+-- 
+2.43.0
+

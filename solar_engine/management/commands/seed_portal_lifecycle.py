@@ -1,0 +1,352 @@
+"""Seed one complete, realistic project lifecycle that lights up every page
+of BOTH portals (OmegaERP work-structure + FieldTracker2x vendor portal).
+
+Idempotent: re-running wipes the previously seeded demo objects (matched by the
+fixed vendor code / project code below) and rebuilds them from scratch.
+
+    python manage.py seed_portal_lifecycle
+
+After it runs, log into FieldTracker2x with vendor code:  VPF001
+"""
+from datetime import timedelta
+from decimal import Decimal
+
+from django.contrib.auth import get_user_model
+from django.core.management import call_command
+from django.core.management.base import BaseCommand
+from django.db import transaction
+from django.utils import timezone
+
+from core.models import ProjectMaster, Vendor
+from solar_engine import billing, constants as C, services
+from solar_engine.models import (
+    BillingMilestone,
+    HandoverCertificate,
+    ProjectBuild,
+    ProjectWorkPackage,
+    SiteProgressEntry,
+)
+
+VENDOR_CODE = 'VPF001'
+PROJECT_CODE = 'SEED-5MW'
+# Pokaran, Rajasthan — used for the geo-tag on field progress
+SITE_LAT, SITE_LNG = Decimal('26.919600'), Decimal('71.922500')
+SITE_NAME = 'Pokaran Block-A'
+
+
+class Command(BaseCommand):
+    help = 'Seed a full vendor-portal lifecycle (project → PO → delivery → field progress → billing → handover).'
+
+    @transaction.atomic
+    def handle(self, *args, **opts):
+        from deliveries.models import Delivery
+        from purchase_orders.models import PurchaseOrder, PurchaseOrderItem
+        from transport.models import VehicleMovement
+
+        today = timezone.now().date()
+        w = self.stdout.write
+
+        # ----- 0. clean any prior seed run -------------------------------
+        self._wipe()
+        w('Cleaned previous demo data.')
+
+        # ----- 1. approving user (super admin → can approve milestones) --
+        User = get_user_model()
+        approver, created = User.objects.get_or_create(
+            username='seed_admin',
+            defaults={'email': 'seed_admin@example.com', 'is_staff': True, 'is_superuser': True},
+        )
+        if created:
+            approver.set_password('seedadmin123')
+            approver.save()
+
+        # ----- 2. WBS / BOQ / spec templates -----------------------------
+        # Only seed templates if they are missing. seed_solar_templates DELETES
+        # and recreates them, which fails (ProtectedError) once real project
+        # builds already reference them — so skip it when defaults exist.
+        from solar_engine.services import EngineError
+        try:
+            services._default_spec_set()
+            services._default_wbs_template(C.PROJECT_TYPE_GROUND)
+            services._default_boq_template(C.PROJECT_TYPE_GROUND)
+            w('Solar templates already present — skipping seed_solar_templates.')
+        except EngineError:
+            call_command('seed_solar_templates')
+            w('Seeded solar templates.')
+
+        # ----- 3. vendor -------------------------------------------------
+        vendor = Vendor.objects.create(
+            vendor_id=VENDOR_CODE,
+            company_name='Saurya Structures & EPC Pvt Ltd',
+            vendor_name='Saurya Structures',
+            contact_person='Ramesh Choudhary',
+            mobile_number='9829000111',
+            email_id='ramesh@sauryastructures.example',
+            address='Plot 14, RIICO Industrial Area',
+            city='Jodhpur', state='Rajasthan', pin_code='342001', country='India',
+            vendor_type='Subcontractor', vendor_category='Civil & Structural',
+            gst_no='08ABCDE1234F1Z5', gst_type='Regular', pan_no='ABCDE1234F',
+            bank_account_name='Saurya Structures & EPC Pvt Ltd',
+            account_number='50100123456789', account_type='Current',
+            status='active',
+        )
+        w(f'Vendor {vendor.vendor_id} created (id={vendor.id}).')
+
+        # ----- 4. project + engine build (stages/WPs/BOQ/sizing) ---------
+        project = ProjectMaster.objects.create(
+            project_code=PROJECT_CODE,
+            project_name='Pokaran 5 MW Ground-Mount Solar EPC',
+            client_name='Rajasthan Green Power Ltd',
+            project_location='Pokaran, Rajasthan',
+            business_unit='Solar EPC',
+            total_mw=Decimal('5.00'),
+            status='in_progress',
+        )
+        # A cleared site + assessment so the per-site development gate passes.
+        self._seed_cleared_site(project, w)
+
+        build = services.instantiate_build(project, C.PROJECT_TYPE_GROUND, Decimal('5'),
+                                            user=approver)
+        build.status = C.BUILD_IN_EXECUTION
+        build.save(update_fields=['status'])
+        w(f'Build #{build.id} instantiated ({build.stages.count()} stages).')
+
+        # ----- 5. assign vendor to work packages + set schedule/status ---
+        stages = list(build.stages.order_by('order'))
+        start = today - timedelta(days=90)
+        for i, st in enumerate(stages):
+            st.planned_start = start + timedelta(days=i * 12)
+            st.planned_end = st.planned_start + timedelta(days=11)
+            if i < len(stages) - 2:
+                st.status = C.STATUS_COMPLETED
+                st.actual_start = st.planned_start
+                st.actual_end = st.planned_end
+            elif i == len(stages) - 2:
+                st.status = C.STATUS_IN_PROGRESS
+                st.actual_start = st.planned_start
+            st.save()
+
+        wps = list(ProjectWorkPackage.objects.filter(stage__build=build).order_by('stage__order', 'order'))
+        # Assign the vendor to this vendor's civil/structural scope — take the first ~6 WPs
+        scope = wps[:6]
+        for idx, wp in enumerate(scope):
+            wp.assigned_vendor = vendor
+            wp.status = C.STATUS_COMPLETED if idx < 3 else (C.STATUS_IN_PROGRESS if idx < 5 else C.STATUS_PENDING)
+            wp.save()
+        w(f'Assigned vendor to {len(scope)} work packages.')
+
+        # ----- 6. purchase orders + items --------------------------------
+        po1 = PurchaseOrder.objects.create(
+            po_number='PO-SEED-0001', po_date=today - timedelta(days=70), vendor=vendor,
+            business_division='solar', project_site_name=SITE_NAME,
+            project_location='Pokaran, Rajasthan',
+            delivery_address='Pokaran Solar Park, Gate 2, Rajasthan',
+            total_po_value=Decimal('2850000.00'), paid_amount=Decimal('1200000.00'),
+            outstanding_amount=Decimal('1650000.00'), status='partially_delivered',
+            expected_delivery_date=today - timedelta(days=40),
+            payment_terms='30% advance, 60% on delivery, 10% retention',
+        )
+        po2 = PurchaseOrder.objects.create(
+            po_number='PO-SEED-0002', po_date=today - timedelta(days=35), vendor=vendor,
+            business_division='solar', project_site_name=SITE_NAME,
+            project_location='Pokaran, Rajasthan',
+            delivery_address='Pokaran Solar Park, Gate 2, Rajasthan',
+            total_po_value=Decimal('1450000.00'), paid_amount=Decimal('0.00'),
+            outstanding_amount=Decimal('1450000.00'), status='approved',
+            expected_delivery_date=today + timedelta(days=10),
+            payment_terms='50% advance, 50% on delivery',
+        )
+
+        def item(po, cat, name, unit, ordered, delivered, rate, brand=''):
+            ordered, delivered, rate = Decimal(ordered), Decimal(delivered), Decimal(rate)
+            pending = ordered - delivered
+            total = (ordered * rate).quantize(Decimal('0.01'))
+            if delivered <= 0:
+                stt = 'pending'
+            elif pending <= 0:
+                stt = 'fully_delivered'
+            else:
+                stt = 'partially_delivered'
+            return PurchaseOrderItem.objects.create(
+                po=po, material_category=cat, material_name=name, unit=unit, brand=brand,
+                ordered_quantity=ordered, delivered_quantity=delivered, pending_quantity=pending,
+                unit_rate=rate, gst_percentage=Decimal('18.00'), total_amount=total, item_status=stt,
+            )
+
+        it1 = item(po1, 'Structure', 'MMS Module Mounting Structure (galv.)', 'MT', '120', '120', '18000', 'Saurya')
+        it2 = item(po1, 'Civil', 'Pile foundation (driven)', 'Nos', '1820', '1820', '450')
+        it3 = item(po1, 'Hardware', 'Fasteners & clamps set', 'Set', '420', '300', '650')
+        it4 = item(po2, 'Cables', 'DC Cable 4 sq.mm', 'Mtr', '26000', '0', '48')
+        it5 = item(po2, 'Earthing', 'Earthing kit (chemical)', 'Nos', '90', '0', '2200')
+        w('2 purchase orders with 5 line items created.')
+
+        # ----- 7. deliveries (completed + partial) -----------------------
+        d1 = Delivery.objects.create(
+            po=po1, po_item=it1, delivery_reference_code='DLV-0001',
+            delivery_date=today - timedelta(days=55), delivered_quantity=Decimal('120'),
+            pending_quantity_after_delivery=Decimal('0'), delivery_location=SITE_NAME,
+            site_received_by='Site Store — M. Khan', delivery_status='received',
+        )
+        d2 = Delivery.objects.create(
+            po=po1, po_item=it3, delivery_reference_code='DLV-0002',
+            delivery_date=today - timedelta(days=20), delivered_quantity=Decimal('300'),
+            pending_quantity_after_delivery=Decimal('120'), delivery_location=SITE_NAME,
+            site_received_by='Site Store — M. Khan', delivery_status='partially_received',
+        )
+        w('2 deliveries created.')
+
+        # ----- 8. vehicle movements (one live / in-transit) --------------
+        VehicleMovement.objects.create(
+            delivery=d1, vehicle_number='RJ19-GA-4521', vehicle_type='Trailer 40ft',
+            transporter_name='Marwar Logistics', driver_name='Suresh', driver_mobile_number='9828123456',
+            lr_number='LR-55120', e_way_bill_number='EWB-9981234567',
+            dispatch_date=today - timedelta(days=58), expected_arrival_date=today - timedelta(days=55),
+            actual_arrival_date=today - timedelta(days=55), vehicle_status='unloaded',
+            loading_location='Jodhpur Plant', unloading_location=SITE_NAME,
+            gps_tracking_link='https://maps.google.com/?q=26.9196,71.9225', freight_amount=Decimal('28000'),
+        )
+        VehicleMovement.objects.create(
+            delivery=d2, vehicle_number='RJ19-GB-7788', vehicle_type='LCV',
+            transporter_name='Marwar Logistics', driver_name='Imran', driver_mobile_number='9828987654',
+            lr_number='LR-55210', e_way_bill_number='EWB-9981299999',
+            dispatch_date=today - timedelta(days=2), expected_arrival_date=today + timedelta(days=1),
+            vehicle_status='in_transit', loading_location='Jodhpur Plant', unloading_location=SITE_NAME,
+            gps_tracking_link='https://maps.google.com/?q=26.9196,71.9225', freight_amount=Decimal('9000'),
+        )
+        w('2 vehicle movements created (1 live in-transit).')
+
+        # ----- 9. field progress entries (geo-tagged, source=field) ------
+        # progress ramps up over time across the vendor's WPs
+        plan = [
+            (scope[0], 'Site survey & layout', [(85, 100), (60, 100), (40, 80)]),
+            (scope[1], 'Pile foundation',       [(80, 100), (50, 75)]),
+            (scope[2], 'MMS erection',          [(70, 100), (45, 70)]),
+            (scope[3], 'Module mounting',       [(30, 55)]),
+            (scope[4], 'DC cabling',            [(10, 25)]),
+        ]
+        n = 0
+        for wp, label, pts in plan:
+            for k, (_, pct) in enumerate(pts):
+                dd = today - timedelta(days=30 - k * 10)
+                SiteProgressEntry.objects.create(
+                    build=build, site_name=SITE_NAME, stage=wp.stage, work_package=wp, vendor=vendor,
+                    progress_date=dd, progress_percent=Decimal(pct),
+                    status=(C.STATUS_COMPLETED if pct >= 100 else C.STATUS_IN_PROGRESS),
+                    note=f'{label}: {pct}% complete', reporter_name='Ramesh Choudhary',
+                    latitude=SITE_LAT, longitude=SITE_LNG, source=SiteProgressEntry.SOURCE_FIELD,
+                )
+                n += 1
+        w(f'{n} geo-tagged field progress entries created.')
+
+        # ----- 10. billing milestones (full lifecycle: paid→invoiced→pending→retention) --
+        def milestone(wp, name, amount, retention, trigger, status='pending', po=None, order=0):
+            return BillingMilestone.objects.create(
+                build=build, work_package=wp, vendor=vendor, name=name, order=order,
+                trigger_type=trigger, amount=Decimal(amount), retention_percent=Decimal(retention),
+                payment_stage='after_installation',
+                status=getattr(BillingMilestone, f'STATUS_{status.upper()}'),
+            )
+
+        m_paid = milestone(scope[0], 'Survey & layout completion', '150000', '5',
+                           BillingMilestone.TRIGGER_WP_DONE, order=1)
+        m_appr = milestone(scope[1], 'Pile foundation completion', '400000', '5',
+                           BillingMilestone.TRIGGER_WP_DONE, order=2)
+        m_inv = milestone(scope[2], 'MMS erection completion', '350000', '5',
+                          BillingMilestone.TRIGGER_WP_DONE, order=3)
+        m_pend = milestone(scope[3], 'Module mounting (50%)', '300000', '5',
+                           BillingMilestone.TRIGGER_PROGRESS, order=4)
+        m_pend.trigger_progress_percent = Decimal('50')
+        m_pend.save(update_fields=['trigger_progress_percent'])
+        m_ret = milestone(scope[0], 'Retention release on handover', '35000', '0',
+                          BillingMilestone.TRIGGER_HANDOVER, order=5)
+
+        # drive the lifecycle through the real service actions
+        billing.milestone_action(m_paid, 'invoice', approver)
+        billing.milestone_action(m_paid, 'approve', approver, purchase_order=po1)
+        billing.milestone_action(m_paid, 'mark_paid', approver)
+
+        billing.milestone_action(m_appr, 'invoice', approver)
+        billing.milestone_action(m_appr, 'approve', approver, purchase_order=po1)
+
+        billing.milestone_action(m_inv, 'invoice', approver)
+        # m_pend stays pending; auto-eligibility handled by refresh below
+        w('5 billing milestones created (paid / approved / invoiced / pending / retention).')
+
+        # ----- 11. handover certificate → release retention -------------
+        cert = HandoverCertificate.objects.create(
+            build=build, vendor=vendor, site_name=SITE_NAME,
+            scope_description='Civil & structural scope — survey, piling, MMS erection.',
+            issued_date=today, issued_by=approver, status=HandoverCertificate.STATUS_ISSUED,
+            remarks='Handover accepted by client representative on site.',
+        )
+        try:
+            billing.generate_certificate_pdf(cert)
+        except Exception as exc:  # reportlab optional
+            w(f'  (certificate PDF skipped: {exc})')
+        billing.release_retention_on_certificate(cert)
+        w(f'Handover certificate {cert.certificate_number} issued; retention released.')
+
+        # ----- 12. refresh auto-eligibility against field progress -------
+        billing.refresh_milestones(build)
+
+        w(self.style.SUCCESS(
+            f'\nDone. Log into FieldTracker2x with vendor code "{VENDOR_CODE}". '
+            f'ERP project: {PROJECT_CODE} (build #{build.id}).'))
+
+    def _seed_cleared_site(self, project, w):
+        """Create a cleared ProjectSite (+ cleared mandatory assessments) so the
+        per-site development gate allows the demo build. No-op where the Sites
+        feature is absent (e.g. the cloud clone)."""
+        try:
+            from core.models import SiteAssessment
+            ProjectSite = SiteAssessment._meta.get_field('site').related_model
+        except (ImportError, Exception):
+            w('  (Sites feature absent — skipping site/assessment seed.)')
+            return
+        site, _ = ProjectSite.objects.get_or_create(
+            project=project, site_code='SEED-S1',
+            defaults={'site_name': SITE_NAME, 'capacity_mw': Decimal('5.00'),
+                      'village': 'Pokaran', 'district': 'Jaisalmer', 'state': 'Rajasthan',
+                      'latitude': SITE_LAT, 'longitude': SITE_LNG, 'status': 'cleared'},
+        )
+        if site.status != 'cleared':
+            site.status = 'cleared'
+            site.save(update_fields=['status'])
+        spec = getattr(SiteAssessment, 'DOCUMENT_SPEC', [])
+        for order, row in enumerate(spec):
+            key, label, mandatory = row[0], row[1], (row[2] if len(row) > 2 else True)
+            SiteAssessment.objects.get_or_create(
+                site=site, document_key=key,
+                defaults={'is_mandatory': mandatory, 'display_order': order,
+                          'status': 'cleared', 'file_name': f'{key}.pdf'},
+            )
+        w(f'Cleared site {site.site_code} seeded ({SiteAssessment.objects.filter(site=site).count()} assessment docs).')
+
+    def _wipe(self):
+        """Remove the previously seeded demo objects so re-runs are clean."""
+        from deliveries.models import Delivery
+        from payments.models import VendorPayment
+        from purchase_orders.models import PurchaseOrder
+        from transport.models import VehicleMovement
+
+        vendor = Vendor.objects.filter(vendor_id=VENDOR_CODE).first()
+        if vendor:
+            VehicleMovement.objects.filter(delivery__po__vendor=vendor).delete()
+            Delivery.objects.filter(po__vendor=vendor).delete()
+            VendorPayment.objects.filter(vendor=vendor).delete()
+            PurchaseOrder.objects.filter(vendor=vendor).delete()
+            SiteProgressEntry.objects.filter(vendor=vendor).delete()
+            BillingMilestone.objects.filter(vendor=vendor).delete()
+            HandoverCertificate.objects.filter(vendor=vendor).delete()
+        project = ProjectMaster.objects.filter(project_code=PROJECT_CODE).first()
+        if project:
+            ProjectBuild.objects.filter(project=project).delete()
+            try:
+                from core.models import SiteAssessment
+                ProjectSite = SiteAssessment._meta.get_field('site').related_model
+                ProjectSite.objects.filter(project=project).delete()  # cascades assessments
+            except (ImportError, Exception):
+                pass
+            project.delete()
+        if vendor:
+            vendor.delete()

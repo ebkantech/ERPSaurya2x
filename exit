@@ -1,0 +1,20 @@
+[33m6ea0c45[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmain[m[33m, [m[1;32mclaude/gifted-bell--lp4g6m[m[33m)[m Add BRQ and break-points analysis docs
+[33m7d766d6[m design and md change
+[33m6242663[m[33m ([m[1;31morigin/claude/gifted-bell--lp4g6m[m[33m)[m first commit
+[33ma2c1b1d[m Convert vendor authorization / staff assignment module to React
+[33m752cb65[m Convert procurement module from Django templates to React
+[33mc28f042[m Add bank-transfer alternative and payment-link resend for vendor onboarding
+[33mac4c5b3[m Merge branch 'fix-project-create'
+[33mb7d9667[m Make project create/list actually work (were mock)
+[33m2469dae[m Merge branch 'vendor-onboarding-payment'
+[33md29b204[m Remove temporary DB diagnostics endpoint; rebuild frontend
+[33mc5a89c1[m Merge branch 'main' into vendor-onboarding-payment
+[33m50a721d[m Remove temporary DB diagnostics endpoint
+[33m06e8ab5[m Fall back to POSTGRES_URL when DATABASE_URL is unset
+[33m218b6e7[m Make DB diagnostics probe token-gated (no login)
+[33m8316709[m Add temporary admin-only DB diagnostics endpoint
+[33m7ae408f[m Harden vendor registration + add DB diagnostics probe
+[33md68dab0[m Add vendor onboarding-fee gateway with Razorpay payment links
+[33m4d75f3f[m Add PO detail write API, vendor-create perm gate, and import fixes
+[33m0557da9[m Delete 16 orphaned vendor_portal/ templates
+[33m9070ee0[m Checkpoint before vendor onboarding build
