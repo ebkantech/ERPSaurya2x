@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import {
   Sun, Zap, Loader2, Lock, CheckCircle2, LayoutList, Table2, Gauge,
   AlertTriangle, ArrowLeft, Sparkles, FileText, HardHat, Plus, Trash2, Unlock,
+  Receipt, FileCheck, IndianRupee,
 } from 'lucide-react'
 import api from '../../services/api'
 
@@ -28,15 +29,19 @@ function StatCard({ icon: Icon, label, value, sub }) {
   )
 }
 
-function GenerateForm({ projectId, project, onCreated }) {
+function GenerateForm({ projectId, project, onCreated, readiness }) {
   const [mode, setMode] = useState('rooftop')
   const [mw, setMw] = useState(project?.total_mw || '5')
   const [foundation, setFoundation] = useState('driven_pile')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
+  const blocked = readiness && readiness.ready === false
+  const blockers = (readiness && readiness.blockers) || []
+
   const submit = async (e) => {
     e.preventDefault()
+    if (blocked) return
     setBusy(true); setError('')
     try {
       const body = { project_type: mode, ac_capacity_mw: mw }
@@ -91,11 +96,26 @@ function GenerateForm({ projectId, project, onCreated }) {
         )}
       </div>
 
+      {blocked && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-3 py-3 space-y-1.5">
+          <div className="flex items-center gap-2 font-semibold">
+            <AlertTriangle size={14} />Site assessment pending — development is blocked
+          </div>
+          <p className="text-xs text-amber-700">
+            Every site in this project must be cleared before the work structure can be generated.
+          </p>
+          <ul className="text-xs text-amber-700 list-disc pl-5 space-y-0.5">
+            {blockers.map((b, i) => <li key={i}>{b}</li>)}
+          </ul>
+        </div>
+      )}
+
       {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-3 py-2">{error}</div>}
 
-      <button type="submit" disabled={busy} className="btn-primary">
+      <button type="submit" disabled={busy || blocked} className="btn-primary"
+        title={blocked ? 'Blocked: clear the site assessment first' : ''}>
         {busy ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
-        Generate Work Structure
+        {blocked ? 'Blocked — assessment pending' : 'Generate Work Structure'}
       </button>
     </form>
   )
@@ -537,6 +557,223 @@ function DailyProgressTab({ projectId, build, vendors }) {
   )
 }
 
+const MS_STATUS_BADGE = {
+  pending: 'badge-slate', eligible: 'badge-blue', invoiced: 'badge-amber',
+  approved: 'badge-green', paid: 'badge-green', on_hold: 'badge-amber',
+}
+
+function BillingTab({ build }) {
+  const [data, setData] = useState({ milestones: [], po_options: [], stage_choices: [], trigger_choices: [], totals_by_status: {} })
+  const [certs, setCerts] = useState([])
+  const [summary, setSummary] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState('')
+  const [showAdd, setShowAdd] = useState(false)
+  const [form, setForm] = useState({ work_package_id: '', name: '', amount: '', retention_percent: '0', trigger_type: 'wp_completion', trigger_progress_percent: '100', payment_stage: 'after_installation' })
+  const [certForm, setCertForm] = useState({ vendor_id: '', site_name: '', scope_description: '' })
+  const [vendors, setVendors] = useState([])
+
+  const allWps = (build.stages || []).flatMap(s => s.work_packages.map(w => ({ ...w, stage_name: s.name })))
+
+  const load = () => {
+    setLoading(true)
+    Promise.all([
+      api.get(`/solar/builds/${build.id}/milestones/`),
+      api.get(`/solar/builds/${build.id}/handover-certificates/`),
+      api.get('/solar/vendor-options/').catch(() => ({ data: { vendors: [] } })),
+      api.get(`/solar/builds/${build.id}/billing-summary/`).catch(() => ({ data: { summary: [] } })),
+    ]).then(([m, c, v, s]) => {
+      setData(m.data); setCerts(c.data.certificates || []); setVendors(v.data.vendors || []); setSummary(s.data.summary || [])
+    }).catch(() => setErr('Could not load billing.')).finally(() => setLoading(false))
+  }
+  useEffect(() => { load() }, [build.id])
+
+  const addMilestone = async (e) => {
+    e.preventDefault(); setErr('')
+    try { await api.post(`/solar/builds/${build.id}/milestones/`, form); setShowAdd(false)
+      setForm(f => ({ ...f, name: '', amount: '' })); load()
+    } catch (e2) { setErr(e2.response?.data?.error || 'Could not add milestone.') }
+  }
+  const act = async (ms, action, extra = {}) => {
+    setErr('')
+    try { await api.post(`/solar/milestones/${ms.id}/`, { action, ...extra }); load() }
+    catch (e2) { setErr(e2.response?.data?.error || 'Action failed.') }
+  }
+  const approve = (ms) => {
+    let poId = ms.purchase_order_id
+    if (!poId) {
+      const opts = data.po_options.filter(p => !ms.vendor_id || p.vendor_id === ms.vendor_id)
+      if (opts.length === 0) { setErr('No purchase order found for this vendor — create a PO first.'); return }
+      poId = window.prompt(`Purchase order to post against:\n${opts.map(p => `${p.id}: ${p.po_number} (₹${p.total_po_value})`).join('\n')}\n\nEnter the PO id:`, opts[0].id)
+      if (!poId) return
+    }
+    act(ms, 'approve', { purchase_order_id: poId })
+  }
+  const delMilestone = async (ms) => { if (window.confirm('Remove this milestone?')) { await api.delete(`/solar/milestones/${ms.id}/`); load() } }
+  const addCert = async (e) => {
+    e.preventDefault(); setErr('')
+    try { await api.post(`/solar/builds/${build.id}/handover-certificates/`, { ...certForm, issue: true })
+      setCertForm({ vendor_id: '', site_name: '', scope_description: '' }); load()
+    } catch (e2) { setErr(e2.response?.data?.error || 'Could not create certificate.') }
+  }
+
+  const inp = 'w-full border border-surface-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-brand-500'
+  if (loading) return <div className="flex items-center gap-2 text-sm text-slate-500 py-10 justify-center"><Loader2 size={16} className="animate-spin" />Loading billing…</div>
+
+  return (
+    <div className="space-y-6">
+      {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl px-4 py-3">{err}</div>}
+
+      {/* Vendor-wise billing summary */}
+      <div className="card overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-2.5 bg-surface-50 border-b border-surface-200">
+          <IndianRupee size={15} className="text-brand-600" />
+          <h4 className="font-semibold text-slate-800 text-sm">Vendor-wise billing summary</h4>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-xs text-slate-400 border-b border-surface-100">
+              <th className="text-left font-medium px-4 py-2">Vendor</th>
+              <th className="text-right font-medium px-2 py-2">Milestones</th>
+              <th className="text-right font-medium px-2 py-2">Total</th>
+              <th className="text-right font-medium px-2 py-2">Approved</th>
+              <th className="text-right font-medium px-2 py-2">Paid</th>
+              <th className="text-right font-medium px-2 py-2">Outstanding</th>
+              <th className="text-right font-medium px-2 py-2">Pending</th>
+              <th className="text-right font-medium px-4 py-2">Retention held</th>
+            </tr></thead>
+            <tbody>
+              {summary.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">No billing yet.</td></tr>}
+              {summary.map(r => (
+                <tr key={r.vendor_id || r.vendor_name} className="border-b border-surface-50 last:border-0">
+                  <td className="px-4 py-2 font-medium text-slate-800">{r.vendor_name}</td>
+                  <td className="px-2 py-2 text-right text-slate-500">{r.milestones}</td>
+                  <td className="px-2 py-2 text-right text-slate-700">₹{money(r.total)}</td>
+                  <td className="px-2 py-2 text-right text-slate-700">₹{money(r.approved)}</td>
+                  <td className="px-2 py-2 text-right font-semibold text-emerald-600">₹{money(r.paid)}</td>
+                  <td className="px-2 py-2 text-right text-amber-600">₹{money(r.outstanding)}</td>
+                  <td className="px-2 py-2 text-right text-slate-500">₹{money(r.pending)}</td>
+                  <td className="px-4 py-2 text-right text-slate-500">₹{money(r.retention_held)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Milestones */}
+      <div className="card overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-2.5 bg-surface-50 border-b border-surface-200">
+          <h4 className="font-semibold text-slate-800 text-sm flex items-center gap-2"><Receipt size={15} className="text-brand-600" />Billing milestones</h4>
+          <button onClick={() => setShowAdd(v => !v)} className="btn-primary !py-1 !text-xs"><Plus size={12} />Add milestone</button>
+        </div>
+
+        {showAdd && (
+          <form onSubmit={addMilestone} className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 border-b border-surface-100 bg-surface-50/40">
+            <label className="flex flex-col gap-1 col-span-2"><span className="text-[11px] font-semibold text-slate-500">Work package (vendor scope)</span>
+              <select className={inp} value={form.work_package_id} required onChange={e => setForm(f => ({ ...f, work_package_id: e.target.value }))}>
+                <option value="">Select…</option>
+                {allWps.map(w => <option key={w.id} value={w.id}>{w.stage_name} · {w.name}{w.assigned_vendor_name ? ` · ${w.assigned_vendor_name}` : ''}</option>)}
+              </select></label>
+            <label className="flex flex-col gap-1"><span className="text-[11px] font-semibold text-slate-500">Milestone name</span>
+              <input className={inp} value={form.name} required onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Foundation done" /></label>
+            <label className="flex flex-col gap-1"><span className="text-[11px] font-semibold text-slate-500">Amount (₹)</span>
+              <input type="number" className={inp} value={form.amount} required onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} /></label>
+            <label className="flex flex-col gap-1"><span className="text-[11px] font-semibold text-slate-500">Retention %</span>
+              <input type="number" className={inp} value={form.retention_percent} onChange={e => setForm(f => ({ ...f, retention_percent: e.target.value }))} /></label>
+            <label className="flex flex-col gap-1"><span className="text-[11px] font-semibold text-slate-500">Trigger</span>
+              <select className={inp} value={form.trigger_type} onChange={e => setForm(f => ({ ...f, trigger_type: e.target.value }))}>
+                {(data.trigger_choices || []).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select></label>
+            {form.trigger_type === 'progress_threshold' && (
+              <label className="flex flex-col gap-1"><span className="text-[11px] font-semibold text-slate-500">At progress %</span>
+                <input type="number" className={inp} value={form.trigger_progress_percent} onChange={e => setForm(f => ({ ...f, trigger_progress_percent: e.target.value }))} /></label>
+            )}
+            <label className="flex flex-col gap-1"><span className="text-[11px] font-semibold text-slate-500">Payment stage</span>
+              <select className={inp} value={form.payment_stage} onChange={e => setForm(f => ({ ...f, payment_stage: e.target.value }))}>
+                {(data.stage_choices || []).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select></label>
+            <div className="col-span-2 md:col-span-4"><button type="submit" className="btn-primary !py-1.5 !text-xs"><Plus size={12} />Add</button></div>
+          </form>
+        )}
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-xs text-slate-400 border-b border-surface-100">
+              <th className="text-left font-medium px-4 py-2">Milestone</th>
+              <th className="text-left font-medium px-2 py-2">Work scope · vendor</th>
+              <th className="text-left font-medium px-2 py-2">Trigger</th>
+              <th className="text-right font-medium px-2 py-2">Amount</th>
+              <th className="text-right font-medium px-2 py-2">Net payable</th>
+              <th className="text-left font-medium px-2 py-2">Status</th>
+              <th className="text-left font-medium px-4 py-2">Actions</th>
+            </tr></thead>
+            <tbody>
+              {data.milestones.length === 0 && <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400">No milestones yet.</td></tr>}
+              {data.milestones.map(ms => (
+                <tr key={ms.id} className="border-b border-surface-50 last:border-0">
+                  <td className="px-4 py-2 font-medium text-slate-800">{ms.name}</td>
+                  <td className="px-2 py-2 text-slate-600 text-xs">{ms.work_package_name}{ms.vendor_name ? ` · ${ms.vendor_name}` : ''}</td>
+                  <td className="px-2 py-2 text-xs text-slate-500">{ms.trigger_type === 'progress_threshold' ? `≥ ${ms.trigger_progress_percent}%` : ms.trigger_type === 'wp_completion' ? 'WP done' : 'Manual'}</td>
+                  <td className="px-2 py-2 text-right text-slate-700">₹{money(ms.amount)}</td>
+                  <td className="px-2 py-2 text-right font-semibold text-slate-800">₹{money(ms.net_payable)}</td>
+                  <td className="px-2 py-2"><span className={`badge ${MS_STATUS_BADGE[ms.status] || 'badge-slate'}`}>{ms.status_display}</span></td>
+                  <td className="px-4 py-2">
+                    <div className="flex items-center gap-1.5 flex-wrap text-xs">
+                      {ms.status === 'eligible' && <button onClick={() => act(ms, 'invoice')} className="text-brand-600 font-medium">Invoice</button>}
+                      {(ms.status === 'eligible' || ms.status === 'invoiced') && <button onClick={() => approve(ms)} className="text-emerald-600 font-medium">Approve→Pay</button>}
+                      {ms.status === 'approved' && <button onClick={() => act(ms, 'mark_paid')} className="text-emerald-600 font-medium">Mark paid</button>}
+                      {ms.status !== 'paid' && ms.status !== 'on_hold' && <button onClick={() => act(ms, 'hold')} className="text-amber-600">Hold</button>}
+                      {ms.status === 'on_hold' && <button onClick={() => act(ms, 'reopen')} className="text-slate-500">Reopen</button>}
+                      <button onClick={() => delMilestone(ms)} className="text-slate-300 hover:text-red-500"><Trash2 size={13} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Handover certificates */}
+      <div className="card overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-2.5 bg-surface-50 border-b border-surface-200">
+          <FileCheck size={15} className="text-brand-600" />
+          <h4 className="font-semibold text-slate-800 text-sm">Handover certificates</h4>
+          <span className="text-xs text-slate-400 ml-2">issued by the client to the vendor / subcontractor</span>
+        </div>
+        <form onSubmit={addCert} className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 border-b border-surface-100">
+          <label className="flex flex-col gap-1"><span className="text-[11px] font-semibold text-slate-500">Vendor</span>
+            <select className={inp} value={certForm.vendor_id} required onChange={e => setCertForm(f => ({ ...f, vendor_id: e.target.value }))}>
+              <option value="">Select…</option>
+              {vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+            </select></label>
+          <label className="flex flex-col gap-1"><span className="text-[11px] font-semibold text-slate-500">Site</span>
+            <input className={inp} value={certForm.site_name} onChange={e => setCertForm(f => ({ ...f, site_name: e.target.value }))} placeholder="e.g. Pokaran" /></label>
+          <label className="flex flex-col gap-1 col-span-2"><span className="text-[11px] font-semibold text-slate-500">Scope handed over</span>
+            <input className={inp} value={certForm.scope_description} onChange={e => setCertForm(f => ({ ...f, scope_description: e.target.value }))} placeholder="e.g. DC + AC + HT complete" /></label>
+          <div className="col-span-2 md:col-span-4"><button type="submit" className="btn-primary !py-1.5 !text-xs"><FileCheck size={13} />Issue certificate</button></div>
+        </form>
+        <div className="divide-y divide-surface-100">
+          {certs.length === 0 && <p className="text-sm text-slate-400 px-4 py-6 text-center">No certificates issued.</p>}
+          {certs.map(c => (
+            <div key={c.id} className="flex items-center justify-between px-4 py-2.5 text-sm">
+              <div>
+                <span className="font-semibold text-slate-800">{c.certificate_number}</span>
+                <span className="text-slate-500"> · {c.vendor_name || '—'}{c.site_name ? ` · ${c.site_name}` : ''}</span>
+                {c.issued_date && <span className="text-xs text-slate-400"> · {c.issued_date}</span>}
+              </div>
+              {c.document_url
+                ? <a href={c.document_url} target="_blank" rel="noreferrer" className="btn-secondary !py-1 !text-xs"><FileText size={12} />PDF</a>
+                : <span className="text-xs text-slate-400">no PDF</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ProjectWorkStructure() {
   const { projectId } = useParams()
   const [build, setBuild] = useState(null)
@@ -548,6 +785,7 @@ export default function ProjectWorkStructure() {
   const [notice, setNotice] = useState('')
   const [vendors, setVendors] = useState([])
   const [library, setLibrary] = useState({ stage_names: [], work_package_names: [] })
+  const [readiness, setReadiness] = useState(null)
 
   const load = async () => {
     setLoading(true); setError('')
@@ -557,6 +795,7 @@ export default function ProjectWorkStructure() {
         api.get('/projects/').catch(() => ({ data: { projects: [] } })),
       ])
       setBuild(buildRes.data.build)
+      setReadiness(buildRes.data.site_readiness || null)
       const p = (projRes.data.projects || []).find(x => String(x.id) === String(projectId))
       setProject(p || null)
     } catch (err) {
@@ -705,14 +944,14 @@ export default function ProjectWorkStructure() {
       {notice && <div className="bg-brand-50 border border-brand-200 text-brand-700 text-sm rounded-xl px-4 py-3 flex items-center gap-2"><CheckCircle2 size={14} />{notice}</div>}
 
       {!build && !error && (
-        <GenerateForm projectId={projectId} project={project} onCreated={setBuild} />
+        <GenerateForm projectId={projectId} project={project} onCreated={setBuild} readiness={readiness} />
       )}
 
       {build && (
         <>
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div className="flex gap-1 bg-surface-100 rounded-lg p-1">
-              {[['sizing', 'Sizing', Gauge], ['wbs', 'Work Breakdown', LayoutList], ['boq', 'BOQ', Table2]].map(([v, l, Icon]) => (
+              {[['sizing', 'Sizing', Gauge], ['wbs', 'Work Breakdown', LayoutList], ['boq', 'BOQ', Table2], ['billing', 'Billing', Receipt]].map(([v, l, Icon]) => (
                 <button key={v} onClick={() => setTab(v)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${tab === v ? 'bg-white text-brand-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
                   <Icon size={13} />{l}
@@ -739,6 +978,7 @@ export default function ProjectWorkStructure() {
             onAddWp={addWp} onRenameWp={renameWp} onDeleteWp={deleteWp} onMoveWp={moveWp} onReorderWps={reorderWps}
           />}
           {tab === 'boq' && <BoqTab sections={build.boq_sections || []} editable={build.is_editable} onItemSave={saveItem} />}
+          {tab === 'billing' && <BillingTab build={build} />}
 
           <p className="text-xs text-slate-400 italic pt-2">
             Final project values must follow approved drawings, datasheets, calculations, standards and utility requirements.

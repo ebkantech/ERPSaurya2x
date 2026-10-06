@@ -321,6 +321,8 @@ class SiteProgressEntry(models.Model):
     status = models.CharField(max_length=20, choices=C.EXECUTION_STATUS_CHOICES, default=C.STATUS_IN_PROGRESS)
     note = models.TextField(blank=True)
     photo = models.FileField(upload_to='field_progress/', null=True, blank=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
 
     reported_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
@@ -342,3 +344,127 @@ class SiteProgressEntry(models.Model):
         if self.work_package_id and not self.vendor_id:
             self.vendor_id = self.work_package.assigned_vendor_id
         super().save(*args, **kwargs)
+
+
+class BillingMilestone(models.Model):
+    """A payable milestone for a vendor against a specific work package.
+    Eligibility auto-advances with work progress; approval posts a
+    VendorPayment against a linked purchase order."""
+
+    TRIGGER_MANUAL = 'manual'
+    TRIGGER_PROGRESS = 'progress_threshold'
+    TRIGGER_WP_DONE = 'wp_completion'
+    TRIGGER_HANDOVER = 'handover_certificate'
+    TRIGGER_CHOICES = [
+        (TRIGGER_MANUAL, 'Manual'),
+        (TRIGGER_PROGRESS, 'Progress reaches %'),
+        (TRIGGER_WP_DONE, 'Work package completed'),
+        (TRIGGER_HANDOVER, 'On handover certificate (retention release)'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_ELIGIBLE = 'eligible'
+    STATUS_INVOICED = 'invoiced'
+    STATUS_APPROVED = 'approved'
+    STATUS_PAID = 'paid'
+    STATUS_HOLD = 'on_hold'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_ELIGIBLE, 'Eligible'),
+        (STATUS_INVOICED, 'Invoiced'),
+        (STATUS_APPROVED, 'Approved'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_HOLD, 'On Hold'),
+    ]
+
+    # Payment stages mirror payments.VendorPayment for a clean hand-off.
+    STAGE_CHOICES = [
+        ('advance', 'Advance'),
+        ('against_dispatch', 'Against Dispatch'),
+        ('against_delivery', 'Against Delivery'),
+        ('after_installation', 'After Installation'),
+        ('retention', 'Retention'),
+        ('final_payment', 'Final Payment'),
+    ]
+
+    build = models.ForeignKey(ProjectBuild, on_delete=models.CASCADE, related_name='billing_milestones')
+    work_package = models.ForeignKey(ProjectWorkPackage, on_delete=models.CASCADE, related_name='billing_milestones')
+    vendor = models.ForeignKey('core.Vendor', on_delete=models.SET_NULL, null=True, blank=True, related_name='billing_milestones')
+    purchase_order = models.ForeignKey(
+        'purchase_orders.PurchaseOrder', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='billing_milestones',
+    )
+
+    name = models.CharField(max_length=200)
+    order = models.PositiveIntegerField(default=0)
+    trigger_type = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default=TRIGGER_WP_DONE)
+    trigger_progress_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('100'))
+    amount = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
+    retention_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0'))
+    payment_stage = models.CharField(max_length=30, choices=STAGE_CHOICES, default='after_installation')
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    eligible_at = models.DateTimeField(null=True, blank=True)
+    invoiced_at = models.DateTimeField(null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    vendor_payment = models.ForeignKey(
+        'payments.VendorPayment', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='solar_milestones',
+    )
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'solar_billing_milestone'
+        ordering = ['build', 'order', 'id']
+
+    def __str__(self):
+        return f'{self.name} ({self.get_status_display()})'
+
+    @property
+    def retention_amount(self):
+        return ((self.amount or Decimal('0')) * (self.retention_percent or Decimal('0')) / Decimal('100')).quantize(Decimal('0.01'))
+
+    @property
+    def net_payable(self):
+        return (self.amount or Decimal('0')) - self.retention_amount
+
+    def save(self, *args, **kwargs):
+        if self.work_package_id and not self.vendor_id:
+            self.vendor_id = self.work_package.assigned_vendor_id
+        super().save(*args, **kwargs)
+
+
+class HandoverCertificate(models.Model):
+    PREFIX = 'HOC'
+    STATUS_DRAFT = 'draft'
+    STATUS_ISSUED = 'issued'
+    STATUS_CHOICES = [(STATUS_DRAFT, 'Draft'), (STATUS_ISSUED, 'Issued')]
+
+    build = models.ForeignKey(ProjectBuild, on_delete=models.CASCADE, related_name='handover_certificates')
+    vendor = models.ForeignKey('core.Vendor', on_delete=models.SET_NULL, null=True, blank=True, related_name='handover_certificates')
+    certificate_number = models.CharField(max_length=40, unique=True, blank=True)
+    site_name = models.CharField(max_length=200, blank=True)
+    scope_description = models.TextField(blank=True)
+    issued_date = models.DateField(null=True, blank=True)
+    issued_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='issued_handover_certs')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    document = models.FileField(upload_to='handover_certificates/', null=True, blank=True)
+    remarks = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'solar_handover_certificate'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return self.certificate_number or f'Handover #{self.pk}'
+
+    def save(self, *args, **kwargs):
+        creating = self.pk is None
+        super().save(*args, **kwargs)
+        if creating and not self.certificate_number:
+            self.certificate_number = f'{self.PREFIX}{str(self.pk).zfill(4)}'
+            super().save(update_fields=['certificate_number'])

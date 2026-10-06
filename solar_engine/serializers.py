@@ -137,3 +137,46 @@ def serialize_progress(entry):
         'source': entry.source,
         'created_at': entry.created_at.isoformat() if entry.created_at else '',
     }
+
+
+def serialize_milestone(ms):
+    return {
+        'id': ms.id,
+        'name': ms.name,
+        'order': ms.order,
+        'work_package_id': ms.work_package_id,
+        'work_package_name': ms.work_package.name if ms.work_package_id else '',
+        'vendor_id': ms.vendor_id,
+        'vendor_name': (ms.vendor.company_name or ms.vendor.vendor_name) if ms.vendor_id else '',
+        'purchase_order_id': ms.purchase_order_id,
+        'po_number': ms.purchase_order.po_number if ms.purchase_order_id else '',
+        'trigger_type': ms.trigger_type,
+        'trigger_progress_percent': str(ms.trigger_progress_percent),
+        'amount': str(ms.amount),
+        'retention_percent': str(ms.retention_percent),
+        'retention_amount': str(ms.retention_amount),
+        'net_payable': str(ms.net_payable),
+        'payment_stage': ms.payment_stage,
+        'status': ms.status,
+        'status_display': ms.get_status_display(),
+        'eligible_at': ms.eligible_at.isoformat() if ms.eligible_at else '',
+        'approved_at': ms.approved_at.isoformat() if ms.approved_at else '',
+        'paid_at': ms.paid_at.isoformat() if ms.paid_at else '',
+        'vendor_payment_id': ms.vendor_payment_id,
+        'notes': ms.notes,
+    }
+
+
+def serialize_certificate(cert):
+    return {
+        'id': cert.id,
+        'certificate_number': cert.certificate_number,
+        'vendor_id': cert.vendor_id,
+        'vendor_name': (cert.vendor.company_name or cert.vendor.vendor_name) if cert.vendor_id else '',
+        'site_name': cert.site_name,
+        'scope_description': cert.scope_description,
+        'issued_date': cert.issued_date.isoformat() if cert.issued_date else '',
+        'status': cert.status,
+        'document_url': cert.document.url if cert.document else '',
+        'remarks': cert.remarks,
+    }

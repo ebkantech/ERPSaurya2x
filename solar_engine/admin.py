@@ -103,3 +103,20 @@ class SiteProgressEntryAdmin(admin.ModelAdmin):
     list_display = ('site_name', 'progress_date', 'vendor', 'progress_percent', 'status', 'source', 'build')
     list_filter = ('source', 'status', 'progress_date')
     search_fields = ('site_name', 'build__project__project_name')
+
+
+from .models import BillingMilestone, HandoverCertificate  # noqa: E402
+
+
+@admin.register(BillingMilestone)
+class BillingMilestoneAdmin(admin.ModelAdmin):
+    list_display = ('name', 'build', 'vendor', 'amount', 'retention_percent', 'status', 'trigger_type')
+    list_filter = ('status', 'trigger_type')
+    search_fields = ('name', 'build__project__project_name')
+
+
+@admin.register(HandoverCertificate)
+class HandoverCertificateAdmin(admin.ModelAdmin):
+    list_display = ('certificate_number', 'build', 'vendor', 'site_name', 'status', 'issued_date')
+    list_filter = ('status',)
+    search_fields = ('certificate_number', 'site_name', 'build__project__project_name')

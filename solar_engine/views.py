@@ -457,6 +457,12 @@ def _create_progress_entry(build, data, request=None, source=SiteProgressEntry.S
         entry.work_package = wp
     if data.get('vendor_id'):
         entry.vendor = Vendor.objects.filter(pk=data['vendor_id']).first()
+    for _geo in ('latitude', 'longitude'):
+        if data.get(_geo) not in (None, '', 'null'):
+            try:
+                setattr(entry, _geo, data[_geo])
+            except Exception:
+                pass
     if request is not None and getattr(request, 'FILES', None) and request.FILES.get('photo'):
         entry.photo = request.FILES['photo']
     if request is not None and getattr(request.user, 'is_authenticated', False):
@@ -539,3 +545,238 @@ def field_ingest_view(request):
     if err:
         return err
     return JsonResponse({'message': 'Progress ingested.', 'entry': serialize_progress(entry)}, status=201)
+
+
+# --- Milestone billing & compliance ---------------------------------------
+from . import billing as _billing  # noqa: E402
+from .models import BillingMilestone, HandoverCertificate  # noqa: E402
+from .serializers import serialize_milestone, serialize_certificate  # noqa: E402
+
+
+def _po_options_for(build):
+    """Purchase orders available to link a milestone payment to (vendors on
+    this build's work packages)."""
+    from purchase_orders.models import PurchaseOrder
+    vendor_ids = set(
+        ProjectWorkPackage.objects.filter(stage__build=build, assigned_vendor__isnull=False)
+        .values_list('assigned_vendor_id', flat=True)
+    )
+    qs = PurchaseOrder.objects.all()
+    if vendor_ids:
+        qs = qs.filter(vendor_id__in=vendor_ids)
+    return [{'id': p.id, 'po_number': p.po_number, 'vendor_id': p.vendor_id,
+             'total_po_value': str(p.total_po_value)} for p in qs.order_by('-created_at')[:200]]
+
+
+def build_milestones_view(request, build_id):
+    """GET → milestones (auto-refreshed vs progress) + PO options.
+    POST → create a milestone {work_package_id, name, amount, trigger_type,
+    trigger_progress_percent?, retention_percent?, payment_stage?}."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    build = get_object_or_404(ProjectBuild, pk=build_id)
+
+    if request.method == 'GET':
+        _billing.refresh_milestones(build)
+        rows = [serialize_milestone(m) for m in build.billing_milestones.select_related('work_package', 'vendor', 'purchase_order')]
+        totals = {}
+        for m in build.billing_milestones.all():
+            totals[m.status] = totals.get(m.status, 0) + float(m.net_payable)
+        return JsonResponse({'milestones': rows, 'po_options': _po_options_for(build),
+                             'stage_choices': BillingMilestone.STAGE_CHOICES,
+                             'trigger_choices': BillingMilestone.TRIGGER_CHOICES,
+                             'totals_by_status': totals})
+
+    if request.method == 'POST':
+        data = _body(request)
+        wp = ProjectWorkPackage.objects.filter(pk=data.get('work_package_id'), stage__build=build).first()
+        if not wp:
+            return JsonResponse({'error': 'Pick a work package in this build.'}, status=400)
+        from decimal import Decimal as _D, InvalidOperation as _IE
+        try:
+            amount = _D(str(data.get('amount') or '0'))
+            retention = _D(str(data.get('retention_percent') or '0'))
+            trig_pct = _D(str(data.get('trigger_progress_percent') or '100'))
+        except _IE:
+            return JsonResponse({'error': 'Invalid numeric value.'}, status=400)
+        ms = BillingMilestone.objects.create(
+            build=build, work_package=wp, name=(data.get('name') or 'Milestone').strip()[:200],
+            order=build.billing_milestones.count() + 1, amount=amount, retention_percent=retention,
+            trigger_type=data.get('trigger_type') if data.get('trigger_type') in dict(BillingMilestone.TRIGGER_CHOICES) else BillingMilestone.TRIGGER_WP_DONE,
+            trigger_progress_percent=trig_pct,
+            payment_stage=data.get('payment_stage') if data.get('payment_stage') in dict(BillingMilestone.STAGE_CHOICES) else 'after_installation',
+            notes=(data.get('notes') or '').strip(),
+        )
+        return JsonResponse({'message': 'Milestone added.', 'milestone': serialize_milestone(ms)}, status=201)
+
+    return JsonResponse({'error': 'GET or POST required'}, status=405)
+
+
+def milestone_detail_view(request, milestone_id):
+    """PATCH → edit fields; DELETE → remove; POST → run an action
+    {action: eligible|invoice|approve|mark_paid|hold|reopen, purchase_order_id?}."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    ms = get_object_or_404(BillingMilestone, pk=milestone_id)
+
+    if request.method == 'DELETE':
+        ms.delete()
+        return JsonResponse({'message': 'Milestone removed.'})
+
+    data = _body(request)
+    if request.method == 'POST' and data.get('action'):
+        from purchase_orders.models import PurchaseOrder
+        po = None
+        if data.get('purchase_order_id'):
+            po = PurchaseOrder.objects.filter(pk=data['purchase_order_id']).first()
+        try:
+            ms = _billing.milestone_action(ms, data['action'], request.user, purchase_order=po)
+        except PermissionDenied as exc:
+            return JsonResponse({'error': str(exc)}, status=403)
+        except _billing.EngineError as exc:
+            return JsonResponse({'error': str(exc)}, status=400)
+        return JsonResponse({'message': 'Milestone updated.', 'milestone': serialize_milestone(ms)})
+
+    if request.method in ('PATCH', 'POST'):
+        from decimal import Decimal as _D, InvalidOperation as _IE
+        try:
+            if 'name' in data:
+                ms.name = (data['name'] or '').strip()[:200]
+            if 'amount' in data:
+                ms.amount = _D(str(data['amount']))
+            if 'retention_percent' in data:
+                ms.retention_percent = _D(str(data['retention_percent']))
+            if 'trigger_progress_percent' in data:
+                ms.trigger_progress_percent = _D(str(data['trigger_progress_percent']))
+        except _IE:
+            return JsonResponse({'error': 'Invalid numeric value.'}, status=400)
+        if 'trigger_type' in data and data['trigger_type'] in dict(BillingMilestone.TRIGGER_CHOICES):
+            ms.trigger_type = data['trigger_type']
+        if 'payment_stage' in data and data['payment_stage'] in dict(BillingMilestone.STAGE_CHOICES):
+            ms.payment_stage = data['payment_stage']
+        if 'purchase_order_id' in data:
+            ms.purchase_order_id = data['purchase_order_id'] or None
+        if 'notes' in data:
+            ms.notes = str(data['notes'])
+        ms.save()
+        return JsonResponse({'message': 'Milestone updated.', 'milestone': serialize_milestone(ms)})
+
+    return JsonResponse({'error': 'PATCH/POST/DELETE required'}, status=405)
+
+
+def build_certificates_view(request, build_id):
+    """GET → handover certificates; POST → create one {vendor_id, site_name,
+    scope_description, issued_date?, issue?}."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    build = get_object_or_404(ProjectBuild, pk=build_id)
+
+    if request.method == 'GET':
+        rows = [serialize_certificate(c) for c in build.handover_certificates.select_related('vendor')]
+        return JsonResponse({'certificates': rows})
+
+    if request.method == 'POST':
+        data = _body(request)
+        cert = HandoverCertificate.objects.create(
+            build=build,
+            vendor=Vendor.objects.filter(pk=data.get('vendor_id')).first() if data.get('vendor_id') else None,
+            site_name=(data.get('site_name') or '').strip(),
+            scope_description=(data.get('scope_description') or '').strip(),
+            issued_date=(data.get('issued_date') or None) or None,
+            issued_by=request.user if getattr(request.user, 'is_authenticated', False) else None,
+            remarks=(data.get('remarks') or '').strip(),
+        )
+        if data.get('issue'):
+            cert.status = HandoverCertificate.STATUS_ISSUED
+            if not cert.issued_date:
+                from datetime import date as _date
+                cert.issued_date = _date.today()
+            cert.save()
+            _billing.generate_certificate_pdf(cert)
+            _billing.release_retention_on_certificate(cert)
+        return JsonResponse({'message': 'Handover certificate created.', 'certificate': serialize_certificate(cert)}, status=201)
+
+    return JsonResponse({'error': 'GET or POST required'}, status=405)
+
+
+def certificate_pdf_view(request, cert_id):
+    """POST → (re)generate PDF and mark issued; GET → redirect to the stored PDF."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    cert = get_object_or_404(HandoverCertificate, pk=cert_id)
+    if request.method == 'POST':
+        cert.status = HandoverCertificate.STATUS_ISSUED
+        if not cert.issued_date:
+            from datetime import date as _date
+            cert.issued_date = _date.today()
+        cert.save()
+        doc = _billing.generate_certificate_pdf(cert)
+        if not doc:
+            return JsonResponse({'error': 'PDF generation unavailable (reportlab missing).'}, status=503)
+        _billing.release_retention_on_certificate(cert)
+        return JsonResponse({'message': 'Certificate issued.', 'certificate': serialize_certificate(cert)})
+    if cert.document:
+        from django.http import HttpResponseRedirect
+        return HttpResponseRedirect(cert.document.url)
+    return JsonResponse({'error': 'No document generated yet.'}, status=404)
+
+
+def build_billing_summary_view(request, build_id):
+    """GET → per-vendor billing summary for a build (claimed/approved/paid/
+    retention held)."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    build = get_object_or_404(ProjectBuild, pk=build_id)
+    _billing.refresh_milestones(build)
+    rows = _billing.vendor_billing_summary(
+        build.billing_milestones.select_related('vendor').all())
+    return JsonResponse({'summary': rows})
+
+
+@csrf_exempt
+def field_vendor_billing_view(request):
+    """Token-auth read endpoint for the vendor / subcontractor portal.
+    Header X-Field-Token (or Bearer); query/body: vendor_id (required).
+    Returns that vendor's milestones + billing summary across all builds."""
+    if request.method not in ('GET', 'POST'):
+        return JsonResponse({'error': 'GET or POST required'}, status=405)
+    token = getattr(_settings, 'FIELD_INGEST_TOKEN', '') or ''
+    if not token:
+        return JsonResponse({'error': 'Vendor portal access is not configured.'}, status=503)
+    supplied = request.headers.get('X-Field-Token', '')
+    if not supplied:
+        auth = request.headers.get('Authorization', '')
+        if auth.lower().startswith('bearer '):
+            supplied = auth[7:].strip()
+    if supplied != token:
+        return JsonResponse({'error': 'Invalid field token.'}, status=401)
+
+    vendor_id = request.GET.get('vendor_id') or (_body(request).get('vendor_id') if request.method == 'POST' else None)
+    if not vendor_id:
+        return JsonResponse({'error': 'vendor_id is required.'}, status=400)
+    vendor = Vendor.objects.filter(pk=vendor_id).first()
+    if not vendor:
+        return JsonResponse({'error': 'Vendor not found.'}, status=404)
+
+    milestones = (BillingMilestone.objects
+                  .filter(vendor_id=vendor_id)
+                  .select_related('vendor', 'work_package', 'purchase_order', 'build__project'))
+    ms_rows = []
+    for m in milestones:
+        row = serialize_milestone(m)
+        row['project'] = getattr(m.build.project, 'project_name', '')
+        row['project_code'] = getattr(m.build.project, 'project_code', '')
+        ms_rows.append(row)
+    summary = _billing.vendor_billing_summary(milestones)
+    return JsonResponse({
+        'vendor': {'id': vendor.id, 'name': vendor.company_name or vendor.vendor_name},
+        'summary': summary[0] if summary else None,
+        'milestones': ms_rows,
+    })

@@ -232,6 +232,145 @@ class WbsEditingTests(TestCase):
         self.assertEqual(r.status_code, 201)
 
 
+class BillingMilestoneTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+
+    def setUp(self):
+        from core.models import Vendor
+        from decimal import Decimal as D
+        self.user = User.objects.create_user(username='pm_bill', password='x', is_superuser=True)
+        self.client.force_login(self.user)
+        self.project = ProjectMaster.objects.create(project_name='Bill', project_code='PRJ700', total_mw=D('5'))
+        self.build = services.instantiate_build(self.project, C.PROJECT_TYPE_ROOFTOP, D('5'))
+        self.vendor = Vendor.objects.create(company_name='Acme EPC')
+        self.wp = self.build.stages.first().work_packages.first()
+        self.wp.assigned_vendor = self.vendor
+        self.wp.save()
+
+    def _make_milestone(self, **kw):
+        from decimal import Decimal as D
+        from solar_engine.models import BillingMilestone
+        return BillingMilestone.objects.create(
+            build=self.build, work_package=self.wp, name=kw.get('name', 'MS1'),
+            amount=kw.get('amount', D('100000')), retention_percent=kw.get('retention', D('10')),
+            trigger_type=kw.get('trigger', BillingMilestone.TRIGGER_PROGRESS),
+            trigger_progress_percent=kw.get('pct', D('80')),
+        )
+
+    def test_create_milestone_via_api(self):
+        r = self.client.post(reverse('solar-milestones', kwargs={'build_id': self.build.id}),
+                             data=json.dumps({'work_package_id': self.wp.id, 'name': 'Foundation', 'amount': '50000', 'retention_percent': '5'}),
+                             content_type='application/json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.json()['milestone']['net_payable'], '47500.00')
+
+    def test_auto_eligible_on_progress(self):
+        from solar_engine.models import SiteProgressEntry, BillingMilestone
+        ms = self._make_milestone(trigger=BillingMilestone.TRIGGER_PROGRESS, pct='80')
+        SiteProgressEntry.objects.create(build=self.build, work_package=self.wp, site_name='S1',
+                                         progress_date='2026-01-01', progress_percent='90')
+        from solar_engine import billing
+        billing.refresh_milestones(self.build)
+        ms.refresh_from_db()
+        self.assertEqual(ms.status, BillingMilestone.STATUS_ELIGIBLE)
+
+    def test_approve_posts_vendor_payment(self):
+        from decimal import Decimal as D
+        from purchase_orders.models import PurchaseOrder
+        from solar_engine.models import BillingMilestone
+        po = PurchaseOrder.objects.create(po_number='PO-700', vendor=self.vendor,
+                                          project_site_name='Site', total_po_value=D('500000'))
+        ms = self._make_milestone()
+        ms.status = BillingMilestone.STATUS_ELIGIBLE; ms.save()
+        r = self.client.post(reverse('solar-milestone', kwargs={'milestone_id': ms.id}),
+                             data=json.dumps({'action': 'approve', 'purchase_order_id': po.id}),
+                             content_type='application/json')
+        self.assertEqual(r.status_code, 200, r.content)
+        ms.refresh_from_db()
+        self.assertEqual(ms.status, BillingMilestone.STATUS_APPROVED)
+        self.assertIsNotNone(ms.vendor_payment_id)
+        self.assertEqual(po.payments.count(), 1)
+
+    def test_handover_certificate_issue(self):
+        r = self.client.post(reverse('solar-certificates', kwargs={'build_id': self.build.id}),
+                             data=json.dumps({'vendor_id': self.vendor.id, 'site_name': 'Pokaran',
+                                              'scope_description': 'DC + AC complete', 'issue': True}),
+                             content_type='application/json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.json()['certificate']['status'], 'issued')
+        self.assertTrue(r.json()['certificate']['certificate_number'].startswith('HOC'))
+
+    def test_retention_release_on_certificate(self):
+        from decimal import Decimal as D
+        from solar_engine.models import BillingMilestone
+        ret = BillingMilestone.objects.create(
+            build=self.build, work_package=self.wp, name='Retention release',
+            amount=D('10000'), retention_percent=D('0'),
+            trigger_type=BillingMilestone.TRIGGER_HANDOVER, payment_stage='retention')
+        self.assertEqual(ret.status, BillingMilestone.STATUS_PENDING)
+        self.client.post(reverse('solar-certificates', kwargs={'build_id': self.build.id}),
+                         data=json.dumps({'vendor_id': self.vendor.id, 'scope_description': 'all done', 'issue': True}),
+                         content_type='application/json')
+        ret.refresh_from_db()
+        self.assertEqual(ret.status, BillingMilestone.STATUS_ELIGIBLE)
+
+    def test_vendor_billing_summary(self):
+        self._make_milestone()  # default 100000, retention 10%
+        r = self.client.get(reverse('solar-billing-summary', kwargs={'build_id': self.build.id}))
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(len(r.json()['summary']) >= 1)
+
+    def test_vendor_portal_billing_token(self):
+        self._make_milestone()
+        url = reverse('solar-field-vendor-billing')
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            bad = self.client.get(url + f'?vendor_id={self.vendor.id}')
+            self.assertEqual(bad.status_code, 401)
+            ok = self.client.get(url + f'?vendor_id={self.vendor.id}', HTTP_X_FIELD_TOKEN='tok')
+            self.assertEqual(ok.status_code, 200)
+            self.assertEqual(ok.json()['vendor']['id'], self.vendor.id)
+            self.assertTrue(len(ok.json()['milestones']) >= 1)
+
+
+class VendorPortalTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+
+    def setUp(self):
+        from core.models import Vendor
+        from decimal import Decimal as D
+        self.vendor = Vendor.objects.create(company_name='Portal EPC')
+        self.project = ProjectMaster.objects.create(project_name='P', total_mw=D('5'))
+        self.build = services.instantiate_build(self.project, C.PROJECT_TYPE_ROOFTOP, D('5'))
+        self.wp = self.build.stages.first().work_packages.first()
+        self.wp.assigned_vendor = self.vendor; self.wp.save()
+
+    def test_auth_by_code(self):
+        url = reverse('vp-auth')
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            bad = self.client.post(url, data=json.dumps({'code': self.vendor.vendor_id}), content_type='application/json')
+            self.assertEqual(bad.status_code, 401)  # no token header
+            ok = self.client.post(url, data=json.dumps({'code': self.vendor.vendor_id}),
+                                  content_type='application/json', HTTP_X_FIELD_TOKEN='tok')
+            self.assertEqual(ok.status_code, 200)
+            self.assertEqual(ok.json()['vendor']['id'], self.vendor.id)
+            wrong = self.client.post(url, data=json.dumps({'code': 'NOPE'}),
+                                     content_type='application/json', HTTP_X_FIELD_TOKEN='tok')
+            self.assertEqual(wrong.status_code, 401)
+
+    def test_dashboard_and_scope(self):
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            d = self.client.get(reverse('vp-dashboard') + f'?vendor_id={self.vendor.id}', HTTP_X_FIELD_TOKEN='tok')
+            self.assertEqual(d.status_code, 200)
+            self.assertIn('work_progress_percent', d.json())
+            w = self.client.get(reverse('vp-work-scope') + f'?vendor_id={self.vendor.id}', HTTP_X_FIELD_TOKEN='tok')
+            self.assertEqual(w.status_code, 200)
+            self.assertTrue(len(w.json()['work_scope']) >= 1)
+
+
 class AuthTests(TestCase):
     @classmethod
     def setUpTestData(cls):
