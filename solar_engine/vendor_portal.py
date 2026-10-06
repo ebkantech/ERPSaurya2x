@@ -249,3 +249,24 @@ def vendor_billing(request):
         rows.append(row)
     summ = _billing.vendor_billing_summary(ms)
     return JsonResponse({'summary': summ[0] if summ else None, 'milestones': rows})
+
+
+def vendor_quality(request):
+    """QA inspections + punch items for the logged-in vendor's work."""
+    err = _check_token(request)
+    if err:
+        return err
+    v = _vendor(request)
+    if not v:
+        return JsonResponse({'error': 'vendor_id required / not found.'}, status=400)
+    from .models import PunchItem, QualityInspection
+    from .serializers import serialize_inspection, serialize_punch
+    ins = (QualityInspection.objects.filter(vendor=v)
+           .select_related('work_package', 'stage').prefetch_related('checkpoints'))
+    punch = PunchItem.objects.filter(vendor=v).select_related('work_package')
+    return JsonResponse({
+        'inspections': [serialize_inspection(i) for i in ins],
+        'punch_items': [serialize_punch(p) for p in punch],
+        'open_defects': punch.exclude(status__in=['resolved', 'verified', 'closed']).count(),
+        'failed_inspections': ins.filter(status='failed').count(),
+    })

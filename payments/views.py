@@ -142,3 +142,40 @@ def razorpay_webhook(request):
         # Always 200 so Razorpay doesn't hammer retries on our own bug.
 
     return JsonResponse({'status': 'ok'})
+
+
+# --- Vendor payments list (real data for the Payments section) -------------
+from permissions.utils import require_authenticated  # noqa: E402
+from .models import VendorPayment  # noqa: E402
+
+
+def vendor_payments_list(request):
+    """GET → all vendor payments (includes milestone-posted work payments)."""
+    redirect = require_authenticated(request)
+    if redirect:
+        return redirect
+    qs = VendorPayment.objects.select_related('po', 'vendor').order_by('-created_at', '-id')
+    status = request.GET.get('status')
+    if status:
+        qs = qs.filter(payment_status=status)
+    rows = [{
+        'id': p.id,
+        'reference': p.payment_reference_code,
+        'is_milestone': (p.payment_reference_code or '').startswith('MS'),
+        'po_number': p.po.po_number if p.po_id else '',
+        'vendor': (p.vendor.company_name or p.vendor.vendor_name) if p.vendor_id else '',
+        'stage': p.get_payment_stage_display() if p.payment_stage else '',
+        'amount': str(p.payment_amount),
+        'tds': str(p.tds_deduction),
+        'net': str(p.net_payable),
+        'status': p.payment_status,
+        'status_display': p.get_payment_status_display(),
+        'paid_date': p.payment_paid_date.isoformat() if p.payment_paid_date else '',
+        'due_date': p.payment_due_date.isoformat() if p.payment_due_date else '',
+        'remarks': p.remarks,
+    } for p in qs]
+    totals = {
+        'paid': str(sum((p.net_payable for p in qs if p.payment_status == 'paid'), __import__('decimal').Decimal('0'))),
+        'count': qs.count(),
+    }
+    return JsonResponse({'payments': rows, 'totals': totals})

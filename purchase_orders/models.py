@@ -56,6 +56,7 @@ class PurchaseOrder(models.Model):
     po_number = models.CharField(max_length=80, unique=True)
     po_date = models.DateField(default=timezone.now)
     vendor = models.ForeignKey('core.Vendor', on_delete=models.PROTECT, related_name='purchase_orders')
+    project = models.ForeignKey('core.ProjectMaster', on_delete=models.SET_NULL, null=True, blank=True, related_name='purchase_orders')
     vendor_tracking_id = models.CharField(max_length=50, blank=True)
     vendor_tracking_name = models.CharField(max_length=200, blank=True)
     business_division = models.CharField(max_length=30, choices=DIVISION_CHOICES, default='solar')

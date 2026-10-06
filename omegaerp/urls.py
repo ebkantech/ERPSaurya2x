@@ -129,6 +129,7 @@ urlpatterns = [
 
     # Vendor onboarding-fee payment gateway (Razorpay)
     path('api/payments/', include('payments.urls')),
+    path('api/deliveries/', include('deliveries.urls')),
 
     # Solar project work-structure & BOQ engine
     path('api/solar/', include('solar_engine.urls')),

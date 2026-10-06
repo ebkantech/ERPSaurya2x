@@ -5,6 +5,7 @@ from . import views
 app_name = 'payments'
 
 urlpatterns = [
+    path('vendor-payments/', views.vendor_payments_list, name='vendor-payments-list'),
     path(
         'vendor-registration/config/',
         views.vendor_registration_payment_config,
