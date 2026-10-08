@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react'
 import { useLocation, Link } from 'react-router-dom'
 import { Bell, Search, ChevronDown, Settings, LogOut, User, X } from 'lucide-react'
 import { useAuth } from '../../context/AuthContext'
+import api from '../../services/api'
 
 const routeLabels = {
   '/':                  ['Dashboard'],
@@ -18,12 +19,12 @@ const routeLabels = {
   '/administration':    ['System', 'Administration'],
 }
 
-const mockNotifications = [
-  { id: 1, title: 'PO-2024-089 approved by Finance', time: '2 min ago', dot: 'bg-green-500', unread: true },
-  { id: 2, title: 'Vendor BHEL submitted GST document', time: '1 hr ago', dot: 'bg-blue-500', unread: true },
-  { id: 3, title: 'Delivery overdue: PO-2024-081 (7 days)', time: '3 hr ago', dot: 'bg-red-500', unread: true },
-  { id: 4, title: 'Monthly PO report generated', time: 'Yesterday', dot: 'bg-slate-400', unread: false },
-]
+const dotFor = (status) => {
+  const s = (status || '').toLowerCase()
+  if (['sent', 'delivered', 'success'].includes(s)) return 'bg-green-500'
+  if (['failed', 'error'].includes(s)) return 'bg-red-500'
+  return 'bg-blue-500'
+}
 
 function useClickOutside(ref, handler) {
   useEffect(() => {
@@ -41,7 +42,15 @@ export default function Header() {
   const location = useLocation()
   const [userMenu, setUserMenu] = useState(false)
   const [notifMenu, setNotifMenu] = useState(false)
-  const [notifications, setNotifications] = useState(mockNotifications)
+  const [notifications, setNotifications] = useState([])
+
+  useEffect(() => {
+    api.get('/notifications/list/')
+      .then(res => setNotifications((res.data.notifications || []).slice(0, 8).map(n => ({
+        id: n.id, title: n.title, time: n.created_at, dot: dotFor(n.status), unread: !n.read,
+      }))))
+      .catch(() => {})
+  }, [])
 
   const userRef = useRef(null)
   const notifRef = useRef(null)
@@ -62,7 +71,7 @@ export default function Header() {
       <div className="flex-1 min-w-0">
         <h1 className="text-sm font-bold text-slate-900 truncate">{pageTitle}</h1>
         <p className="text-xs text-slate-400 truncate">
-          Saurya2x{crumbs.length > 1 ? ' / ' + crumbs.join(' / ') : ''}
+          OmegaERP{crumbs.length > 1 ? ' / ' + crumbs.join(' / ') : ''}
         </p>
       </div>
 

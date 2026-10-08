@@ -41,7 +41,6 @@ from .forms import (
     VendorAssignmentUploadForm,
     VendorAutoDistributeForm,
     VendorBulkAssignForm,
-    VendorMasterForm,
     VendorNoteForm,
 )
 from .models import VendorAssignment, VendorAssignmentHistory
@@ -187,48 +186,6 @@ def _assign_vendor_to_staff(
         vendor=vendor,
     )
     return assignment
-
-
-def vendor_master(request):
-    vendors = Vendor.objects.order_by('company_name')
-    query = (request.GET.get('q') or '').strip()
-    status_filter = (request.GET.get('status') or '').strip()
-
-    if query:
-        vendors = vendors.filter(
-            Q(vendor_id__icontains=query)
-            | Q(vendor_name__icontains=query)
-            | Q(company_name__icontains=query)
-            | Q(contact_person__icontains=query)
-            | Q(gst_no__icontains=query)
-        )
-    if status_filter:
-        vendors = vendors.filter(status=status_filter)
-
-    if request.method == 'POST':
-        if not can_create_vendors(request.user):
-            messages.error(request, 'You do not have permission to create vendors.')
-            return redirect('procurement-vendor-master')
-        form = VendorMasterForm(request.POST)
-        if form.is_valid():
-            vendor = form.save(commit=False)
-            if not vendor.vendor_name:
-                vendor.vendor_name = vendor.company_name
-            vendor.save()
-            messages.success(request, 'Vendor master record created successfully.')
-            return redirect('procurement-vendor-master')
-    else:
-        form = VendorMasterForm(initial={'country': 'India', 'status': 'active'})
-
-    context = {
-        'page_title': 'Vendor Master',
-        'procurement_nav': True,
-        'vendors': vendors,
-        'vendor_form': form,
-        'query': query,
-        'status_filter': status_filter,
-    }
-    return render(request, 'procurement_vendor_master.html', context)
 
 
 def vendor_control_dashboard_api(request):

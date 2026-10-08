@@ -240,6 +240,21 @@ class ProjectStage(models.Model):
 
 
 class ProjectWorkPackage(models.Model):
+    # Engagement model — how a vendor is engaged on this work package.
+    #   milestone   : vendor is paid against billing milestones (material + work
+    #                 may both sit in the vendor's scope). The BillingMilestone flow.
+    #   free_issue  : the company supplies ("free-issues") the material; the vendor
+    #                 is responsible for LABOUR, MACHINERY and INSTALLATION services
+    #                 only. Material moves to the vendor via a task-linked Material
+    #                 Requisition and a Material Issue Slip (MIS), both validated
+    #                 against the work package's Bill of Material (BOM).
+    ENGAGEMENT_MILESTONE = 'milestone'
+    ENGAGEMENT_FREE_ISSUE = 'free_issue'
+    ENGAGEMENT_CHOICES = [
+        (ENGAGEMENT_MILESTONE, 'On milestones'),
+        (ENGAGEMENT_FREE_ISSUE, 'Free-issue material (labour/machinery/installation only)'),
+    ]
+
     stage = models.ForeignKey(ProjectStage, on_delete=models.CASCADE, related_name='work_packages')
     order = models.PositiveIntegerField(default=0)
     name = models.CharField(max_length=200)
@@ -254,8 +269,15 @@ class ProjectWorkPackage(models.Model):
         'core.Vendor', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='solar_work_packages',
     )
+    engagement_type = models.CharField(
+        max_length=20, choices=ENGAGEMENT_CHOICES, default=ENGAGEMENT_MILESTONE,
+    )
     notes = models.TextField(blank=True)
     source_wp = models.ForeignKey(WbsWorkPackage, on_delete=models.SET_NULL, null=True, blank=True)
+
+    @property
+    def is_free_issue(self):
+        return self.engagement_type == self.ENGAGEMENT_FREE_ISSUE
 
     class Meta:
         db_table = 'solar_project_work_package'
@@ -712,3 +734,326 @@ class BudgetLine(models.Model):
         if b <= 0:
             return 0
         return round(float((self.actual_amount or Decimal('0')) / b * 100), 1)
+
+
+# =========================================================================
+# Free-issue material layer — BOM, task-linked requisition, Material Issue
+# Slip (MIS). Applies to work packages whose engagement_type is free_issue:
+# the company supplies the material; the vendor does labour/machinery/
+# installation only. Issues are validated against the work package's BOM.
+# =========================================================================
+class WorkPackageBom(models.Model):
+    """A bill-of-material line for a (usually free-issue) work package — the
+    budgeted quantity of a material the company will issue to the vendor.
+    Can be seeded from the build's BOQ material rows, or entered by the PM."""
+
+    work_package = models.ForeignKey(
+        ProjectWorkPackage, on_delete=models.CASCADE, related_name='bom_lines',
+    )
+    order = models.PositiveIntegerField(default=0)
+    material_code = models.CharField(max_length=60, blank=True)
+    material_name = models.CharField(max_length=200)
+    specification = models.TextField(blank=True)
+    unit = models.CharField(max_length=40, default='Nos')
+    bom_quantity = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
+    rate = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
+    source_boq_item = models.ForeignKey(
+        ProjectBoqItem, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+
+    class Meta:
+        db_table = 'solar_wp_bom'
+        ordering = ['work_package', 'order', 'id']
+
+    def __str__(self):
+        return f'{self.material_name} ({self.bom_quantity} {self.unit})'
+
+    # ---- running balances across all requisitions / issues for this line ----
+    @property
+    def requested_quantity(self):
+        agg = self.requisition_lines.aggregate(s=models.Sum('quantity_requested'))
+        return agg['s'] or Decimal('0')
+
+    @property
+    def issued_quantity(self):
+        agg = self.issue_lines.aggregate(s=models.Sum('quantity_issued'))
+        return agg['s'] or Decimal('0')
+
+    @property
+    def available_quantity(self):
+        """BOM quantity still available to issue without breaching the BOM."""
+        return (self.bom_quantity or Decimal('0')) - self.issued_quantity
+
+
+class MaterialRequisition(models.Model):
+    """A task-linked request for free-issue material. Raised against a work
+    package (the 'task'); the requested quantities are validated against the
+    work package's BOM balance before the store issues an MIS."""
+
+    STATUS_DRAFT = 'draft'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_APPROVED = 'approved'
+    STATUS_ISSUED = 'issued'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_SUBMITTED, 'Submitted'),
+        (STATUS_APPROVED, 'Approved'),
+        (STATUS_ISSUED, 'Issued'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    requisition_no = models.CharField(max_length=40, unique=True)
+    work_package = models.ForeignKey(
+        ProjectWorkPackage, on_delete=models.CASCADE, related_name='requisitions',
+    )
+    vendor = models.ForeignKey(
+        'core.Vendor', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='material_requisitions',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_SUBMITTED)
+    needed_by = models.DateField(null=True, blank=True)
+    note = models.TextField(blank=True)
+    raised_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='material_requisitions',
+    )
+    raised_by_name = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'solar_material_requisition'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return self.requisition_no
+
+
+class MaterialRequisitionLine(models.Model):
+    requisition = models.ForeignKey(
+        MaterialRequisition, on_delete=models.CASCADE, related_name='lines',
+    )
+    bom_line = models.ForeignKey(
+        WorkPackageBom, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisition_lines',
+    )
+    material_code = models.CharField(max_length=60, blank=True)
+    material_name = models.CharField(max_length=200)
+    unit = models.CharField(max_length=40, default='Nos')
+    quantity_requested = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
+
+    class Meta:
+        db_table = 'solar_material_requisition_line'
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.material_name} x {self.quantity_requested}'
+
+
+class MaterialIssueSlip(models.Model):
+    """MIS — the store's record of material physically issued to the vendor
+    for a free-issue work package. Issued quantities are validated against
+    the BOM so cumulative issues never exceed the budgeted bill of material."""
+
+    STATUS_ISSUED = 'issued'
+    STATUS_ACKNOWLEDGED = 'acknowledged'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = [
+        (STATUS_ISSUED, 'Issued'),
+        (STATUS_ACKNOWLEDGED, 'Acknowledged by vendor'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
+    mis_no = models.CharField(max_length=40, unique=True)
+    work_package = models.ForeignKey(
+        ProjectWorkPackage, on_delete=models.CASCADE, related_name='issue_slips',
+    )
+    requisition = models.ForeignKey(
+        MaterialRequisition, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='issue_slips',
+    )
+    vendor = models.ForeignKey(
+        'core.Vendor', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='material_issue_slips',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ISSUED)
+    issued_on = models.DateField(null=True, blank=True)
+    note = models.TextField(blank=True)
+    issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='material_issue_slips',
+    )
+    issued_by_name = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'solar_material_issue_slip'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return self.mis_no
+
+
+class MaterialIssueSlipLine(models.Model):
+    issue_slip = models.ForeignKey(
+        MaterialIssueSlip, on_delete=models.CASCADE, related_name='lines',
+    )
+    bom_line = models.ForeignKey(
+        WorkPackageBom, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='issue_lines',
+    )
+    material_code = models.CharField(max_length=60, blank=True)
+    material_name = models.CharField(max_length=200)
+    unit = models.CharField(max_length=40, default='Nos')
+    quantity_issued = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
+
+    class Meta:
+        db_table = 'solar_material_issue_slip_line'
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.material_name} x {self.quantity_issued}'
+
+
+# =========================================================================
+# Engineering & Document Management (DMS) — Module 2
+# Repository for CAD drawings, PVsyst layouts, SLDs and datasheets, with
+# revision (version) control and statutory / DISCOM approval tracking.
+# A document is the logical deliverable; each upload is a DocumentRevision;
+# the document points at its current (latest approved/issued) revision.
+# =========================================================================
+class EngineeringDocument(models.Model):
+    DISC_CIVIL = 'civil'
+    DISC_STRUCT = 'structural'
+    DISC_ELEC = 'electrical'
+    DISC_LAYOUT = 'layout'
+    DISC_GEN = 'general'
+    DISCIPLINE_CHOICES = [
+        (DISC_CIVIL, 'Civil'), (DISC_STRUCT, 'Structural'),
+        (DISC_ELEC, 'Electrical'), (DISC_LAYOUT, 'Layout / PV'),
+        (DISC_GEN, 'General'),
+    ]
+
+    CAT_CAD = 'cad_drawing'
+    CAT_PVSYST = 'pvsyst_layout'
+    CAT_SLD = 'sld'
+    CAT_DATASHEET = 'datasheet'
+    CAT_STATUTORY = 'statutory'
+    CAT_OTHER = 'other'
+    CATEGORY_CHOICES = [
+        (CAT_CAD, 'CAD Drawing'), (CAT_PVSYST, 'PVsyst Layout'),
+        (CAT_SLD, 'Single Line Diagram (SLD)'), (CAT_DATASHEET, 'Datasheet'),
+        (CAT_STATUTORY, 'Statutory / Approval'), (CAT_OTHER, 'Other'),
+    ]
+
+    STATUS_DRAFT = 'draft'
+    STATUS_IN_REVIEW = 'in_review'
+    STATUS_APPROVED = 'approved'
+    STATUS_FOR_DISCOM = 'for_discom'
+    STATUS_SUPERSEDED = 'superseded'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'), (STATUS_IN_REVIEW, 'In Review'),
+        (STATUS_APPROVED, 'Approved'), (STATUS_FOR_DISCOM, 'Submitted for DISCOM'),
+        (STATUS_SUPERSEDED, 'Superseded'),
+    ]
+
+    project = models.ForeignKey('core.ProjectMaster', on_delete=models.CASCADE, related_name='engineering_documents')
+    build = models.ForeignKey(ProjectBuild, on_delete=models.SET_NULL, null=True, blank=True, related_name='engineering_documents')
+    doc_no = models.CharField(max_length=60, unique=True)
+    title = models.CharField(max_length=255)
+    discipline = models.CharField(max_length=20, choices=DISCIPLINE_CHOICES, default=DISC_GEN)
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default=CAT_OTHER)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    current_revision = models.ForeignKey(
+        'DocumentRevision', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+',
+    )
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='owned_documents')
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'solar_engineering_document'
+        ordering = ['project', 'discipline', 'doc_no']
+
+    def __str__(self):
+        return f'{self.doc_no} — {self.title}'
+
+    @property
+    def latest_rev_no(self):
+        return self.current_revision.rev_no if self.current_revision_id else ''
+
+
+class DocumentRevision(models.Model):
+    """A single version of an engineering document. Revisions are immutable
+    once approved; a new upload creates the next revision and supersedes the
+    previous current one."""
+
+    STATUS_DRAFT = 'draft'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+    STATUS_SUPERSEDED = 'superseded'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'), (STATUS_SUBMITTED, 'Submitted for review'),
+        (STATUS_APPROVED, 'Approved'), (STATUS_REJECTED, 'Rejected'),
+        (STATUS_SUPERSEDED, 'Superseded'),
+    ]
+
+    document = models.ForeignKey(EngineeringDocument, on_delete=models.CASCADE, related_name='revisions')
+    rev_no = models.CharField(max_length=10)  # R0, R1, R2 …
+    sequence = models.PositiveIntegerField(default=0)
+    file = models.FileField(upload_to='engineering_dms/', null=True, blank=True)
+    change_note = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    prepared_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='prepared_revisions')
+    prepared_by_name = models.CharField(max_length=150, blank=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_revisions')
+    approved_on = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'solar_document_revision'
+        ordering = ['document', 'sequence', 'id']
+        unique_together = [('document', 'rev_no')]
+
+    def __str__(self):
+        return f'{self.document.doc_no} {self.rev_no} ({self.status})'
+
+
+class StatutoryApproval(models.Model):
+    """Statutory / DISCOM approval tracked against a project (and optionally a
+    specific document), e.g. DISCOM feeder approval, CEIG energisation,
+    Chief Electrical Inspector sign-off."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+    STATUS_RESUBMIT = 'resubmit'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'), (STATUS_SUBMITTED, 'Submitted'),
+        (STATUS_APPROVED, 'Approved'), (STATUS_REJECTED, 'Rejected'),
+        (STATUS_RESUBMIT, 'Resubmit required'),
+    ]
+
+    project = models.ForeignKey('core.ProjectMaster', on_delete=models.CASCADE, related_name='statutory_approvals')
+    document = models.ForeignKey(EngineeringDocument, on_delete=models.SET_NULL, null=True, blank=True, related_name='statutory_approvals')
+    authority = models.CharField(max_length=120)       # DISCOM / CEIG / CEA …
+    approval_type = models.CharField(max_length=150)   # feeder approval, energisation …
+    reference_no = models.CharField(max_length=80, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    submitted_date = models.DateField(null=True, blank=True)
+    approved_date = models.DateField(null=True, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
+    remark = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'solar_statutory_approval'
+        ordering = ['project', '-created_at', '-id']
+
+    def __str__(self):
+        return f'{self.authority} — {self.approval_type} ({self.status})'

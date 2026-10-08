@@ -24,14 +24,14 @@
                 <a class="nav-link app-nav-link {% if '/procurement/' in request.path %}active{% endif %}" href="/purchase-orders/dashboard">PO Tracking</a>
                 {% endif %}
                 {% if is_admin or user_perms.projects.can_view %}
-                <a class="nav-link app-nav-link {% if '/projects/' in request.path %}active{% endif %}" href="{% url 'project-module' %}">Project Module</a>
+                <a class="nav-link app-nav-link {% if '/projects/' in request.path %}active{% endif %}" href="/projects">Project Module</a>
                 {% endif %}
                 {% if is_admin or user_perms.vendors.can_view %}
-                <a class="nav-link app-nav-link {% if '/vendors/' in request.path %}active{% endif %}" href="{% url 'vendor-module' %}">Vendor Module</a>
+                <a class="nav-link app-nav-link {% if '/vendors/' in request.path %}active{% endif %}" href="/vendors">Vendor Module</a>
                 {% endif %}
                 <a class="nav-link app-nav-link {% if '/vendor-control/' in request.path %}active{% endif %}" href="/vendor-control">Vendor Authorization</a>
                 {% if is_admin or user_perms.vendors.can_view %}
-                <a class="nav-link app-nav-link {% if '/materials/' in request.path %}active{% endif %}" href="{% url 'material-module' %}">Material Master</a>
+                <a class="nav-link app-nav-link {% if '/materials/' in request.path %}active{% endif %}" href="/materials">Material Master</a>
                 {% endif %}
                 {% else %}
                 <a class="nav-link app-nav-link" href="/admin/login/">Sign In</a>
@@ -77,10 +77,10 @@
             {% endif %}
             {% if vendor_module_nav %}
             <nav class="module-subnav mb-4">
-                <a class="module-subnav-link {% if request.path == '/vendors/' %}active{% endif %}" href="{% url 'vendor-module' %}">Overview</a>
-                <a class="module-subnav-link {% if request.path == '/vendors/list/' %}active{% endif %}" href="{% url 'vendor-list' %}">Vendor List</a>
+                <a class="module-subnav-link {% if request.path == '/vendors/' %}active{% endif %}" href="/vendors">Overview</a>
+                <a class="module-subnav-link {% if request.path == '/vendors/list/' %}active{% endif %}" href="/vendors">Vendor List</a>
                 {% if is_admin or user_perms.vendors.can_create %}
-                <a class="module-subnav-link {% if request.path == '/vendors/registration/' %}active{% endif %}" href="{% url 'vendor-registration' %}">Vendor Registration</a>
+                <a class="module-subnav-link {% if request.path == '/vendors/registration/' %}active{% endif %}" href="/vendors/new">Vendor Registration</a>
                 {% endif %}
             </nav>
             {% endif %}
@@ -112,7 +112,7 @@
             {% if procurement_nav %}
             <nav class="module-subnav mb-4">
                 <a class="module-subnav-link" href="/purchase-orders/dashboard">Overview</a>
-                <a class="module-subnav-link {% if request.path == '/procurement/vendors/' %}active{% endif %}" href="{% url 'procurement-vendor-master' %}">Vendor Master</a>
+                <a class="module-subnav-link {% if request.path == '/procurement/vendors/' %}active{% endif %}" href="/vendors">Vendor Master</a>
                 <a class="module-subnav-link" href="/purchase-orders">PO Master</a>
                 <a class="module-subnav-link" href="/purchase-orders/bulk-generate">Bulk PO Generator</a>
                 <a class="module-subnav-link" href="/reports">Reports</a>
@@ -120,16 +120,16 @@
             {% endif %}
             {% if project_module_nav %}
             <nav class="module-subnav mb-4">
-                <a class="module-subnav-link {% if request.path == '/projects/' %}active{% endif %}" href="{% url 'project-module' %}">Overview</a>
-                <a class="module-subnav-link {% if request.path == '/projects/master/' %}active{% endif %}" href="{% url 'project-master' %}">Project Master</a>
-                <a class="module-subnav-link {% if request.path == '/projects/distribution/' %}active{% endif %}" href="{% url 'project-distribution' %}">Vendor Distribution</a>
+                <a class="module-subnav-link {% if request.path == '/projects/' %}active{% endif %}" href="/projects">Overview</a>
+                <a class="module-subnav-link {% if request.path == '/projects/master/' %}active{% endif %}" href="/projects">Project Master</a>
+                <a class="module-subnav-link {% if request.path == '/projects/distribution/' %}active{% endif %}" href="/projects">Vendor Distribution</a>
             </nav>
             {% endif %}
             {% if material_module_nav %}
             <nav class="module-subnav mb-4">
-                <a class="module-subnav-link {% if request.path == '/materials/' %}active{% endif %}" href="{% url 'material-module' %}">Overview</a>
-                <a class="module-subnav-link {% if request.path == '/materials/master/' %}active{% endif %}" href="{% url 'material-master' %}">Material List</a>
-                <a class="module-subnav-link {% if request.path == '/materials/quotation/' %}active{% endif %}" href="{% url 'material-quotation' %}">Quotation Generator</a>
+                <a class="module-subnav-link {% if request.path == '/materials/' %}active{% endif %}" href="/materials">Overview</a>
+                <a class="module-subnav-link {% if request.path == '/materials/master/' %}active{% endif %}" href="/materials">Material List</a>
+                <a class="module-subnav-link {% if request.path == '/materials/quotation/' %}active{% endif %}" href="/materials/quotations">Quotation Generator</a>
             </nav>
             {% endif %}
             {% block content %}{% endblock %}

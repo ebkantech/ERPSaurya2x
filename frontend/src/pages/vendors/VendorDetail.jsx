@@ -1,226 +1,226 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
-  ArrowLeft, Building2, MapPin, Phone, Mail, Globe, Edit,
-  FileText, CheckCircle, Clock, ShoppingCart, CreditCard, Star,
+  ArrowLeft, Building2, MapPin, Phone, Mail, Edit, Save, X, Loader2, FileText,
 } from 'lucide-react'
+import api from '../../services/api'
 
-const vendor = {
-  id: 1, code: 'VND-001', name: 'Tata Projects Ltd', cat: 'EPC Contractor',
-  status: 'Active', msme: false, rating: 4.8,
-  gst: '27AAACT2727Q1ZW', pan: 'AAACT2727Q', cin: 'U45209MH1979PLC021258',
-  address: 'Mafatlal Centre, 10th Floor, Nariman Point, Mumbai - 400021',
-  state: 'Maharashtra', city: 'Mumbai', pincode: '400021',
-  contact: '+91 22 6745 9000', email: 'procurement@tataprojects.com', website: 'www.tataprojects.com',
-  bank: 'HDFC Bank Ltd', ifsc: 'HDFC0001234', account: '50200012345678', branch: 'Nariman Point, Mumbai',
-  registeredDate: '12 Jan 2022',
-  recentPOs: [
-    { id: 'PO-2024-089', project: 'Solar Farm Alpha',  value: '₹24.5L', status: 'Active',   date: '15 Jun 2024' },
-    { id: 'PO-2024-076', project: 'Wind Farm Gamma',   value: '₹18.2L', status: 'Closed',   date: '2 May 2024'  },
-    { id: 'PO-2024-061', project: 'Biogas Plant Beta', value: '₹31.4L', status: 'Closed',   date: '14 Mar 2024' },
-  ],
-  tasks: [
-    { id: 1, title: 'Collect GST certificate (renewal)', status: 'Pending', due: '30 Jun 2024' },
-    { id: 2, title: 'Quotation follow-up — Solar Phase 2', status: 'In Progress', due: '25 Jun 2024' },
-    { id: 3, title: 'Verify bank details update', status: 'Completed', due: '15 Jun 2024' },
-  ],
-  docs: [
-    { name: 'GST Registration Certificate',  date: '12 Jan 2022', type: 'Compliance' },
-    { name: 'PAN Card',                       date: '12 Jan 2022', type: 'Identity'   },
-    { name: 'Cancelled Cheque',               date: '5 Mar 2023',  type: 'Banking'    },
-    { name: 'Incorporation Certificate',      date: '12 Jan 2022', type: 'Legal'      },
-  ],
+const statusBadge = { active: 'badge-green', pending: 'badge-amber', inactive: 'badge-slate' }
+const poBadge = { active: 'badge-blue', closed: 'badge-slate', fully_paid: 'badge-green', partially_delivered: 'badge-amber', approved: 'badge-blue' }
+const money = (v) => '₹' + Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })
+
+// serializer(snake) -> update payload(camel)
+const toForm = (v) => ({
+  companyName: v.company_name || '', experienceDetails: v.experience_details || '',
+  clientListData: (v.client_list || []).join(', '),
+  vendorType: v.vendor_type || '', vendorCategory: v.vendor_category || '',
+  contactPerson: v.contact_person || '', emailId: v.email_id || '',
+  attendeeName: v.attendee_name || '', bdeName: v.bde_name || '', meetingWith: v.meeting_with || '',
+  msmeReg: v.msme_reg || '', panNo: v.pan_no || '', pfReg: v.pf_reg || '',
+  gstNo: v.gst_no || '', gstType: v.gst_type || '', gstStatus: v.gst_status || '',
+  lastGstr1: v.last_gstr1 || '', gstPendingStatus: v.gst_pending_status || '',
+  aadhaarNo: v.aadhaar_no || '', labourWelfareFund: v.labour_welfare_fund || '', professionalTax: v.professional_tax || '',
+  turnoverYear1: v.turnover_year_1 || '', turnoverYear2: v.turnover_year_2 || '', turnoverYear3: v.turnover_year_3 || '',
+  bankAccountName: v.bank_account_name || '', bankNameAddress: v.bank_name_address || '',
+  accountType: v.account_type || '', accountNumber: v.account_number || '', bankProofType: v.bank_proof_type || '',
+  qualification_status: v.qualification_status || '',
+  address: v.address || '', address2: v.address2 || '', city: v.city || '', state: v.state || '',
+  pin: v.pin_code || '', country: v.country || '',
+})
+
+const CHOICES = {
+  vendorType: ['private limited', 'proprieter', 'partner', 'individual'],
+  vendorCategory: ['service-provider', 'sub-contractor'],
+  accountType: ['savings', 'current', 'cash credit', 'other'],
+  bankProofType: ['passbook', 'cancelled-cheque'],
+  qualification_status: ['qualified', 'disqualified'],
+  gstPendingStatus: ['more than year', 'less than second year'],
 }
 
-const TABS = ['Overview', 'Purchase Orders', 'Tasks', 'Documents']
-
-const statusBadge = { Active:'badge-blue', Closed:'badge-slate', Delivered:'badge-green' }
-const taskBadge   = { Pending:'badge-amber', 'In Progress':'badge-blue', Completed:'badge-green' }
+function Field({ label, value }) {
+  return (
+    <div>
+      <p className="text-xs text-slate-400">{label}</p>
+      <p className="text-sm text-slate-800 font-medium">{value || '—'}</p>
+    </div>
+  )
+}
 
 export default function VendorDetail() {
   const { id } = useParams()
+  const [v, setV] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState('')
   const [tab, setTab] = useState('Overview')
+  const [editing, setEditing] = useState(false)
+  const [form, setForm] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
+
+  const load = () => {
+    setLoading(true)
+    api.get(`/vendors/${id}/`)
+      .then(res => setV(res.data.vendor))
+      .catch(() => setErr('Could not load this vendor.'))
+      .finally(() => setLoading(false))
+  }
+  useEffect(() => { load() }, [id])
+
+  const startEdit = () => { setForm(toForm(v)); setSaveErr(''); setEditing(true) }
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
+
+  const save = async () => {
+    setSaving(true); setSaveErr('')
+    try {
+      const fd = new FormData()
+      Object.entries(form).forEach(([k, val]) => {
+        if (k === 'clientListData') {
+          const arr = val.split(',').map(s => s.trim()).filter(Boolean)
+          fd.append('clientListData', JSON.stringify(arr))
+        } else fd.append(k, val)
+      })
+      const res = await api.post(`/vendors/${id}/update/`, fd, { headers: { 'Content-Type': undefined } })
+      setV(res.data.vendor ? { ...v, ...res.data.vendor } : v)
+      setEditing(false)
+      load()
+    } catch (e) {
+      const d = e.response?.data?.error
+      setSaveErr(Array.isArray(d) ? d.join(' · ') : (d || 'Could not save changes.'))
+    } finally { setSaving(false) }
+  }
+
+  if (loading) return <div className="flex items-center gap-2 text-sm text-slate-500 py-16 justify-center"><Loader2 size={16} className="animate-spin" />Loading…</div>
+  if (err || !v) return <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl px-4 py-3 m-6">{err || 'Vendor not found.'}</div>
+
+  const inp = 'w-full border border-surface-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-brand-500'
 
   return (
-    <div className="space-y-6 pb-4">
-      {/* Back + header */}
-      <div>
-        <Link to="/vendors" className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-4 transition-colors">
-          <ArrowLeft size={15} />Back to Vendors
-        </Link>
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-brand-50 border-2 border-brand-100 flex items-center justify-center flex-shrink-0">
-              <Building2 size={26} className="text-brand-600" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <h2 className="text-xl font-bold text-slate-900">{vendor.name}</h2>
-                <span className="badge badge-green">{vendor.status}</span>
-                {vendor.msme && <span className="badge badge-violet">MSME</span>}
-              </div>
-              <p className="text-slate-500 text-sm">{vendor.cat} · {vendor.code}</p>
-              <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1">
-                <MapPin size={11} />{vendor.city}, {vendor.state}
-              </p>
+    <div className="space-y-6 pb-6">
+      <Link to="/vendors" className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700"><ArrowLeft size={14} />Back to vendors</Link>
+
+      {/* Header */}
+      <div className="card p-5 flex items-start justify-between flex-wrap gap-3">
+        <div className="flex items-start gap-3">
+          <div className="w-12 h-12 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center"><Building2 size={22} /></div>
+          <div>
+            <h2 className="text-lg font-bold text-slate-900">{v.company_name}</h2>
+            <p className="text-sm text-slate-500">{v.vendor_id} · {v.vendor_category || 'Vendor'}
+              <span className={`ml-2 badge ${statusBadge[v.status] || 'badge-slate'}`}>{v.status || '—'}</span></p>
+            <div className="flex gap-4 mt-2 text-xs text-slate-500">
+              {v.contact_person && <span className="inline-flex items-center gap-1"><Building2 size={12} />{v.contact_person}</span>}
+              {v.mobile_number && <span className="inline-flex items-center gap-1"><Phone size={12} />{v.mobile_number}</span>}
+              {v.email_id && <span className="inline-flex items-center gap-1"><Mail size={12} />{v.email_id}</span>}
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button className="btn-secondary"><Edit size={14} />Edit</button>
-            <button className="btn-primary"><ShoppingCart size={14} />Create PO</button>
+        </div>
+        {!editing
+          ? <button onClick={startEdit} className="btn-secondary"><Edit size={14} />Edit</button>
+          : <div className="flex gap-2">
+              <button onClick={() => setEditing(false)} className="btn-secondary"><X size={14} />Cancel</button>
+              <button onClick={save} disabled={saving} className="btn-primary">{saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}Save</button>
+            </div>}
+      </div>
+
+      {saveErr && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl px-4 py-3">{saveErr}</div>}
+
+      {!editing && (
+        <>
+          <div className="flex gap-1 bg-surface-100 rounded-lg p-1 w-max">
+            {['Overview', 'Purchase Orders'].map(t => (
+              <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 text-xs font-semibold rounded-md ${tab === t ? 'bg-white text-brand-600 shadow-sm' : 'text-slate-500'}`}>{t}</button>
+            ))}
           </div>
-        </div>
-      </div>
 
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {[
-          { label: 'Total POs',          value: '24',     icon: ShoppingCart, cls: 'text-blue-600 bg-blue-50'    },
-          { label: 'Total PO Value',     value: '₹4.8Cr', icon: CreditCard,   cls: 'text-emerald-600 bg-emerald-50' },
-          { label: 'Active Tasks',       value: '2',      icon: Clock,        cls: 'text-amber-600 bg-amber-50'  },
-          { label: 'Vendor Rating',      value: '4.8 ★',  icon: Star,         cls: 'text-violet-600 bg-violet-50'},
-        ].map(k => {
-          const Icon = k.icon
-          return (
-            <div key={k.label} className="card p-4 flex items-center gap-3">
-              <div className={`w-9 h-9 rounded-xl ${k.cls} flex items-center justify-center flex-shrink-0`}>
-                <Icon size={16} />
-              </div>
-              <div>
-                <p className="font-bold text-slate-900 text-lg leading-none">{k.value}</p>
-                <p className="text-xs text-slate-400 mt-0.5">{k.label}</p>
-              </div>
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Tabs */}
-      <div className="border-b border-surface-200">
-        <div className="flex gap-0">
-          {TABS.map(t => (
-            <button key={t} onClick={() => setTab(t)}
-              className={`px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
-                tab === t ? 'border-brand-500 text-brand-600' : 'border-transparent text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Tab content */}
-      {tab === 'Overview' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          {/* Registration */}
-          <div className="card p-5">
-            <h3 className="font-semibold text-slate-900 text-sm mb-4">Registration Details</h3>
-            <dl className="space-y-3">
-              {[
-                { l:'GST Number',   v: vendor.gst          },
-                { l:'PAN Number',   v: vendor.pan          },
-                { l:'CIN',          v: vendor.cin          },
-                { l:'Registered On',v: vendor.registeredDate},
-              ].map(r => (
-                <div key={r.l} className="flex items-center justify-between py-1.5 border-b border-surface-50 last:border-0">
-                  <dt className="text-xs text-slate-500 font-medium">{r.l}</dt>
-                  <dd className="text-sm text-slate-900 font-mono text-xs">{r.v}</dd>
+          {tab === 'Overview' && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div className="card p-5 space-y-3">
+                <h3 className="text-sm font-semibold text-slate-800">Company & Contact</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Vendor type" value={v.vendor_type} />
+                  <Field label="Category" value={v.vendor_category} />
+                  <Field label="Contact person" value={v.contact_person} />
+                  <Field label="Mobile" value={v.mobile_number} />
+                  <Field label="Email" value={v.email_id} />
+                  <Field label="Registered" value={v.created_at} />
                 </div>
-              ))}
-            </dl>
-          </div>
-
-          {/* Contact */}
-          <div className="card p-5">
-            <h3 className="font-semibold text-slate-900 text-sm mb-4">Contact Information</h3>
-            <div className="space-y-3">
-              {[
-                { icon: MapPin, v: vendor.address   },
-                { icon: Phone,  v: vendor.contact   },
-                { icon: Mail,   v: vendor.email     },
-                { icon: Globe,  v: vendor.website   },
-              ].map((c, i) => {
-                const Icon = c.icon
-                return (
-                  <div key={i} className="flex items-start gap-3">
-                    <Icon size={15} className="text-slate-400 flex-shrink-0 mt-0.5" />
-                    <span className="text-sm text-slate-700">{c.v}</span>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-
-          {/* Bank */}
-          <div className="card p-5">
-            <h3 className="font-semibold text-slate-900 text-sm mb-4">Bank Details</h3>
-            <dl className="space-y-3">
-              {[
-                { l:'Bank Name',     v: vendor.bank    },
-                { l:'IFSC Code',     v: vendor.ifsc    },
-                { l:'Account No.',   v: '•••••• ' + vendor.account.slice(-4) },
-                { l:'Branch',        v: vendor.branch  },
-              ].map(r => (
-                <div key={r.l} className="flex items-center justify-between py-1.5 border-b border-surface-50 last:border-0">
-                  <dt className="text-xs text-slate-500 font-medium">{r.l}</dt>
-                  <dd className="text-sm text-slate-900">{r.v}</dd>
+              </div>
+              <div className="card p-5 space-y-3">
+                <h3 className="text-sm font-semibold text-slate-800">GST & Compliance</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="GST No." value={v.gst_no} />
+                  <Field label="GST type" value={v.gst_type} />
+                  <Field label="PAN" value={v.pan_no} />
+                  <Field label="MSME reg." value={v.msme_reg} />
+                  <Field label="Qualification" value={v.qualification_status} />
                 </div>
-              ))}
-            </dl>
-          </div>
-        </div>
-      )}
-
-      {tab === 'Purchase Orders' && (
-        <div className="card overflow-hidden">
-          <table className="data-table">
-            <thead><tr><th>PO Number</th><th>Project</th><th>Value</th><th>Status</th><th>Date</th></tr></thead>
-            <tbody>
-              {vendor.recentPOs.map(po => (
-                <tr key={po.id}>
-                  <td><Link to={`/purchase-orders/${po.id}`} className="font-semibold text-brand-600 hover:text-brand-700">{po.id}</Link></td>
-                  <td className="text-slate-600">{po.project}</td>
-                  <td className="font-semibold text-slate-900">{po.value}</td>
-                  <td><span className={`badge ${statusBadge[po.status] || 'badge-slate'}`}>{po.status}</span></td>
-                  <td className="text-xs text-slate-400">{po.date}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {tab === 'Tasks' && (
-        <div className="card overflow-hidden">
-          <table className="data-table">
-            <thead><tr><th>#</th><th>Task</th><th>Status</th><th>Due Date</th></tr></thead>
-            <tbody>
-              {vendor.tasks.map(t => (
-                <tr key={t.id}>
-                  <td className="text-slate-400 text-xs">{t.id}</td>
-                  <td className="font-medium text-slate-800">{t.title}</td>
-                  <td><span className={`badge ${taskBadge[t.status]}`}>{t.status}</span></td>
-                  <td className="text-xs text-slate-400">{t.due}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {tab === 'Documents' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {vendor.docs.map((d, i) => (
-            <div key={i} className="card p-4 flex items-center gap-3 hover:shadow-card-hover transition-all cursor-pointer group">
-              <div className="w-10 h-10 rounded-xl bg-brand-50 border border-brand-100 flex items-center justify-center flex-shrink-0">
-                <FileText size={18} className="text-brand-500" />
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-900 truncate">{d.name}</p>
-                <p className="text-xs text-slate-400 mt-0.5">{d.type} · Uploaded {d.date}</p>
+              <div className="card p-5 space-y-3">
+                <h3 className="text-sm font-semibold text-slate-800">Banking</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Account name" value={v.bank_account_name} />
+                  <Field label="Account number" value={v.account_number} />
+                  <Field label="Account type" value={v.account_type} />
+                  <Field label="Bank / address" value={v.bank_name_address} />
+                </div>
+                {v.bank_proof_url && <a href={v.bank_proof_url} target="_blank" rel="noreferrer" className="text-xs text-brand-600 inline-flex items-center gap-1"><FileText size={12} />{v.bank_proof_name || 'Bank proof'} ↗</a>}
               </div>
-              <span className="badge badge-slate text-xs group-hover:badge-blue transition-colors">{d.type}</span>
+              <div className="card p-5 space-y-3">
+                <h3 className="text-sm font-semibold text-slate-800">Address</h3>
+                <p className="text-sm text-slate-700">{[v.address, v.address2, v.city, v.state, v.pin_code, v.country].filter(Boolean).join(', ') || '—'}</p>
+                {(v.client_list || []).length > 0 && <><p className="text-xs text-slate-400 mt-2">Clients</p><p className="text-sm text-slate-700">{v.client_list.join(', ')}</p></>}
+              </div>
+            </div>
+          )}
+
+          {tab === 'Purchase Orders' && (
+            <div className="card overflow-hidden">
+              <table className="data-table">
+                <thead><tr><th>PO</th><th>Site</th><th className="text-right">Value</th><th className="text-right">Outstanding</th><th>Status</th><th>Date</th></tr></thead>
+                <tbody>
+                  {(v.recent_pos || []).length === 0 && <tr><td colSpan={6} className="text-center text-slate-400 py-6">No purchase orders.</td></tr>}
+                  {(v.recent_pos || []).map(p => (
+                    <tr key={p.po_number}>
+                      <td className="font-semibold text-brand-600 text-xs">{p.po_number}</td>
+                      <td className="text-slate-700">{p.project}</td>
+                      <td className="text-right font-semibold">{money(p.value)}</td>
+                      <td className="text-right text-amber-600">{money(p.outstanding)}</td>
+                      <td><span className={`badge ${poBadge[p.status] || 'badge-slate'}`}>{p.status}</span></td>
+                      <td className="text-xs text-slate-400">{p.date}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      {editing && form && (
+        <div className="space-y-5">
+          <p className="text-xs text-slate-400">All fields below are saved together. Required: company, address, city, state, PIN, country, experience, at least one client, contact person, email, attendee, BDE, turnover (3 years), bank details.</p>
+          {[
+            ['Company', [['companyName', 'Company name'], ['vendorType', 'Vendor type'], ['vendorCategory', 'Category'], ['experienceDetails', 'Experience details'], ['clientListData', 'Clients (comma-separated)']]],
+            ['Contact', [['contactPerson', 'Contact person'], ['emailId', 'Email'], ['attendeeName', 'Attendee name'], ['bdeName', 'BDE name'], ['meetingWith', 'Meeting with']]],
+            ['GST & Compliance', [['gstNo', 'GST No.'], ['gstType', 'GST type'], ['gstStatus', 'GST status'], ['lastGstr1', 'Last GSTR-1'], ['gstPendingStatus', 'GST pending status'], ['panNo', 'PAN'], ['msmeReg', 'MSME reg.'], ['pfReg', 'PF reg.'], ['aadhaarNo', 'Aadhaar'], ['qualification_status', 'Qualification status']]],
+            ['Turnover', [['turnoverYear1', 'Turnover Y1'], ['turnoverYear2', 'Turnover Y2'], ['turnoverYear3', 'Turnover Y3']]],
+            ['Banking', [['bankAccountName', 'Account name'], ['accountNumber', 'Account number'], ['accountType', 'Account type'], ['bankProofType', 'Bank proof type'], ['bankNameAddress', 'Bank name & address']]],
+            ['Address', [['address', 'Address'], ['address2', 'Address line 2'], ['city', 'City'], ['state', 'State'], ['pin', 'PIN'], ['country', 'Country']]],
+          ].map(([section, fields]) => (
+            <div key={section} className="card p-5">
+              <h3 className="text-sm font-semibold text-slate-800 mb-3">{section}</h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {fields.map(([k, label]) => (
+                  <label key={k} className="block">
+                    <span className="block text-xs font-semibold text-slate-500 mb-1">{label}</span>
+                    {CHOICES[k]
+                      ? <select className={inp} value={form[k]} onChange={set(k)}>
+                          <option value="">— select —</option>
+                          {CHOICES[k].map(o => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                      : <input className={inp} value={form[k]} onChange={set(k)} />}
+                  </label>
+                ))}
+              </div>
             </div>
           ))}
         </div>

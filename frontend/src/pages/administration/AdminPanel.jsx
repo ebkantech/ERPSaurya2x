@@ -1,8 +1,9 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   Building2, Users, Shield, Mail, Bell, Clock, Key,
   Server, Download, Database, Save, ChevronRight,
 } from 'lucide-react'
+import api from '../../services/api'
 
 const TABS = [
   { id:'company',  label:'Company',    icon: Building2 },
@@ -11,24 +12,6 @@ const TABS = [
   { id:'email',    label:'Email',      icon: Mail     },
   { id:'audit',    label:'Audit Logs', icon: Clock    },
   { id:'system',   label:'System',     icon: Server   },
-]
-
-const roles = [
-  { name:'Super Admin',        users:1, perms:'Full Access'    },
-  { name:'Admin',              users:2, perms:'All except Super' },
-  { name:'Procurement Manager',users:3, perms:'PO + Vendor + Delivery' },
-  { name:'Purchase Officer',   users:5, perms:'PO Create & Edit' },
-  { name:'Finance Manager',    users:2, perms:'Payments + Reports' },
-  { name:'Site Engineer',      users:8, perms:'Deliveries + QC'   },
-  { name:'Viewer',             users:4, perms:'Read-only'       },
-]
-
-const auditLogs = [
-  { user:'Rajesh Kumar', action:'Created PO-2024-089', module:'Purchase Orders', time:'15 Jun 2024, 10:42 AM', ip:'192.168.1.45' },
-  { user:'Anjali Mehta', action:'Updated vendor VND-003 bank details', module:'Vendors', time:'15 Jun 2024, 09:15 AM', ip:'192.168.1.67' },
-  { user:'Priya Sharma', action:'Approved payment PAY-2024-084-1', module:'Payments', time:'14 Jun 2024, 4:30 PM', ip:'192.168.1.23' },
-  { user:'Kiran Patel',  action:'Logged in',                         module:'Auth',     time:'14 Jun 2024, 9:00 AM', ip:'192.168.1.89' },
-  { user:'System',       action:'Backup completed successfully',      module:'System',   time:'14 Jun 2024, 2:00 AM', ip:'localhost'     },
 ]
 
 function CompanyTab() {
@@ -61,6 +44,8 @@ function CompanyTab() {
 }
 
 function UsersTab() {
+  const [roles, setRoles] = useState([])
+  useEffect(() => { api.get('/admin/roles/').then(r => setRoles(r.data.roles || [])).catch(() => {}) }, [])
   return (
     <div className="space-y-5">
       <div className="card overflow-hidden">
@@ -71,13 +56,14 @@ function UsersTab() {
         <table className="data-table">
           <thead><tr><th>Role</th><th className="text-center">Users</th><th>Permission Scope</th><th></th></tr></thead>
           <tbody>
+            {roles.length === 0 && <tr><td colSpan={4} className="text-center text-slate-400 py-6">No roles configured.</td></tr>}
             {roles.map(r => (
-              <tr key={r.name}>
-                <td className="font-semibold text-slate-800">{r.name}</td>
+              <tr key={r.role}>
+                <td className="font-semibold text-slate-800 capitalize">{(r.role || '').replace(/_/g, ' ')}</td>
                 <td className="text-center">
                   <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-brand-50 text-brand-700 text-xs font-bold">{r.users}</span>
                 </td>
-                <td className="text-xs text-slate-500">{r.perms}</td>
+                <td className="text-xs text-slate-500">{r.modules} modules{r.can_approve ? ' · can approve' : ''}</td>
                 <td>
                   <button className="text-xs text-brand-500 hover:text-brand-600 font-semibold flex items-center gap-1">
                     Edit <ChevronRight size={11} />
@@ -147,7 +133,7 @@ function EmailTab() {
           { l:'SMTP Port',     v:'587',            type:'number'   },
           { l:'Username',      v:'erp@omega.com',  type:'email'    },
           { l:'Password',      v:'••••••••••',     type:'password' },
-          { l:'From Name',     v:'Saurya2x System',type:'text', full:true },
+          { l:'From Name',     v:'OmegaERP System',type:'text', full:true },
           { l:'Reply-To',      v:'noreply@omega.com', type:'email', full:true },
         ].map(f => (
           <div key={f.l} className={f.full ? 'md:col-span-2' : ''}>
@@ -165,6 +151,8 @@ function EmailTab() {
 }
 
 function AuditTab() {
+  const [auditLogs, setAuditLogs] = useState([])
+  useEffect(() => { api.get('/admin/audit-logs/').then(r => setAuditLogs(r.data.audit_logs || [])).catch(() => {}) }, [])
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-surface-100 flex items-center justify-between">
@@ -174,6 +162,7 @@ function AuditTab() {
       <table className="data-table">
         <thead><tr><th>User</th><th>Action</th><th>Module</th><th>IP Address</th><th>Time</th></tr></thead>
         <tbody>
+          {auditLogs.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No audit entries.</td></tr>}
           {auditLogs.map((l, i) => (
             <tr key={i}>
               <td className="font-semibold text-slate-800">{l.user}</td>

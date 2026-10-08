@@ -25,6 +25,9 @@ def serialize_work_package(wp):
         'allocation_id': wp.allocation_id,
         'assigned_vendor_id': wp.assigned_vendor_id,
         'assigned_vendor_name': (vendor.company_name or vendor.vendor_name) if vendor else '',
+        'engagement_type': wp.engagement_type,
+        'engagement_type_display': wp.get_engagement_type_display(),
+        'is_free_issue': wp.is_free_issue,
         'notes': wp.notes,
     }
 

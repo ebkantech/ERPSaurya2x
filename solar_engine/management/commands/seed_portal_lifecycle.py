@@ -85,10 +85,10 @@ class Command(BaseCommand):
             email_id='ramesh@sauryastructures.example',
             address='Plot 14, RIICO Industrial Area',
             city='Jodhpur', state='Rajasthan', pin_code='342001', country='India',
-            vendor_type='Subcontractor', vendor_category='Civil & Structural',
+            vendor_type='partner', vendor_category='sub-contractor',
             gst_no='08ABCDE1234F1Z5', gst_type='Regular', pan_no='ABCDE1234F',
             bank_account_name='Saurya Structures & EPC Pvt Ltd',
-            account_number='50100123456789', account_type='Current',
+            account_number='50100123456789', account_type='current',
             status='active',
         )
         w(f'Vendor {vendor.vendor_id} created (id={vendor.id}).')
@@ -135,6 +135,39 @@ class Command(BaseCommand):
             wp.status = C.STATUS_COMPLETED if idx < 3 else (C.STATUS_IN_PROGRESS if idx < 5 else C.STATUS_PENDING)
             wp.save()
         w(f'Assigned vendor to {len(scope)} work packages.')
+
+        # ----- 5b. free-issue material engagement (BOM → requisition → MIS) --
+        # Engage the last package of this vendor's scope on free-issue material:
+        # the company supplies material; the vendor does labour/machinery/
+        # installation only, drawing material via a requisition + issue slip.
+        if scope:
+            from solar_engine import free_issue as fi
+            from solar_engine.models import WorkPackageBom
+            fiwp = scope[-1]
+            fiwp.engagement_type = ProjectWorkPackage.ENGAGEMENT_FREE_ISSUE
+            fiwp.save()
+            if not fiwp.bom_lines.exists():
+                for nm, un, qty, rate in [
+                    ('Module mounting structure (hot-dip galvanised)', 'MT', '18', '72000'),
+                    ('Earthing strip 25x3mm GI', 'm', '600', '95'),
+                    ('DC cable 4 sq.mm (solar)', 'm', '2400', '38'),
+                ]:
+                    WorkPackageBom.objects.create(
+                        work_package=fiwp, material_name=nm, unit=un,
+                        bom_quantity=Decimal(qty), rate=Decimal(rate))
+            if not fiwp.requisitions.exists():
+                bom = list(fiwp.bom_lines.all())
+                req = fi.create_requisition(
+                    fiwp,
+                    [{'bom_line': bom[0].id, 'quantity': '10'},
+                     {'bom_line': bom[1].id, 'quantity': '350'}],
+                    vendor=vendor, note='Site requisition for mounting + earthing.')
+                fi.issue_material(
+                    fiwp,
+                    [{'bom_line': bom[0].id, 'quantity': '10'},
+                     {'bom_line': bom[1].id, 'quantity': '350'}],
+                    requisition=req, issued_by_name='Stores')
+            w(f'Free-issue material demo on "{fiwp.name}" (BOM + requisition + MIS).')
 
         # ----- 6. purchase orders + items --------------------------------
         po1 = PurchaseOrder.objects.create(
@@ -296,6 +329,9 @@ class Command(BaseCommand):
         # ----- 14. budget vs actual (seed demo figures) -----------------
         self._seed_budget(build, w)
 
+        # ----- 15. engineering DMS (documents + revisions + approvals) --
+        self._seed_dms(project, build, w)
+
         w(self.style.SUCCESS(
             f'\nDone. Log into FieldTracker2x with vendor code "{VENDOR_CODE}". '
             f'ERP project: {PROJECT_CODE} (build #{build.id}).'))
@@ -372,6 +408,47 @@ class Command(BaseCommand):
         budget.status = 'approved'
         budget.save(update_fields=['status'])
         w(f'Budget seeded ({budget.lines.count()} cost heads).')
+
+    def _seed_dms(self, project, build, w):
+        """Seed engineering documents with revision history + a DISCOM approval."""
+        from solar_engine import dms as _dms
+        from solar_engine.models import (
+            EngineeringDocument as ED, DocumentRevision as DR, StatutoryApproval as SA)
+        from datetime import date, timedelta
+        today = date.today()
+        specs = [
+            ('SLD-5MW-001', '5 MW Main Single Line Diagram', ED.DISC_ELEC, ED.CAT_SLD, 2, True),
+            ('PV-LAYOUT-001', 'PVsyst Array Layout & Shadow Plan', ED.DISC_LAYOUT, ED.CAT_PVSYST, 1, True),
+            ('CIV-FND-010', 'Pile Foundation GA Drawing', ED.DISC_CIVIL, ED.CAT_CAD, 1, False),
+            ('STR-MMS-020', 'Module Mounting Structure Detail', ED.DISC_STRUCT, ED.CAT_CAD, 0, False),
+        ]
+        for doc_no, title, disc, cat, extra_revs, approve in specs:
+            if ED.objects.filter(doc_no=doc_no).exists():
+                continue
+            doc = ED.objects.create(project=project, build=build, doc_no=doc_no,
+                                    title=title, discipline=disc, category=cat)
+            _dms.add_revision(doc, change_note='Initial issue', prepared_by_name='Design Cell')
+            for i in range(extra_revs):
+                _dms.add_revision(doc, change_note=f'Revision {i + 1} — review comments incorporated',
+                                  prepared_by_name='Design Cell')
+            if approve:
+                _dms.set_revision_status(doc.current_revision, DR.STATUS_APPROVED)
+        # one submitted-for-DISCOM document + a statutory approval record
+        sld = ED.objects.filter(doc_no='SLD-5MW-001').first()
+        if sld:
+            sld.status = ED.STATUS_FOR_DISCOM
+            sld.save(update_fields=['status'])
+            if not SA.objects.filter(project=project, approval_type='Feeder approval').exists():
+                SA.objects.create(
+                    project=project, document=sld, authority='DISCOM (JVVNL)',
+                    approval_type='Feeder approval', reference_no='JVVNL/APR/5MW/2026/114',
+                    status=SA.STATUS_SUBMITTED, submitted_date=today - timedelta(days=12),
+                    remark='Awaiting feeder sanction for 5 MW evacuation.')
+                SA.objects.create(
+                    project=project, authority='CEIG Rajasthan',
+                    approval_type='Energisation / charging permission',
+                    status=SA.STATUS_PENDING, remark='To be filed after erection completion.')
+        w(f'DMS seeded ({ED.objects.filter(project=project).count()} documents + DISCOM/CEIG approvals).')
 
     def _seed_cleared_site(self, project, w):
         """Create a cleared ProjectSite (+ cleared mandatory assessments) so the

@@ -233,3 +233,28 @@ def my_followups_api(request):
     ).order_by('due_date', '-priority')
 
     return JsonResponse({'results': [serialize_vendor_task(task) for task in followup_rows]})
+
+
+# --- Tasks list API (real data for the Tasks page) -----------------------
+from django.http import JsonResponse as _JsonResponse  # noqa: E402
+from permissions.utils import require_authenticated as _req_auth  # noqa: E402
+from .models import VendorTask as _VendorTask  # noqa: E402
+
+
+def tasks_list_api(request):
+    redirect = _req_auth(request)
+    if redirect:
+        return redirect
+    qs = _VendorTask.objects.select_related('vendor', 'assigned_staff').order_by('-created_at')
+    status = request.GET.get('status')
+    if status:
+        qs = qs.filter(task_status=status)
+    rows = [{
+        'id': t.id, 'title': t.task_title, 'type': t.task_type,
+        'vendor': (t.vendor.company_name or t.vendor.vendor_name) if t.vendor_id else '',
+        'assignee': str(t.assigned_staff) if t.assigned_staff_id else '',
+        'due': t.due_date.isoformat() if t.due_date else '',
+        'status': t.task_status, 'priority': t.priority,
+        'description': t.description,
+    } for t in qs]
+    return _JsonResponse({'tasks': rows, 'count': qs.count()})

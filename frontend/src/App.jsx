@@ -34,7 +34,7 @@ import NotificationsList from './pages/notifications/NotificationsList'
 import AdminPanel    from './pages/administration/AdminPanel'
 import AssistantPage from './pages/assistant/AssistantPage'
 import NotFound      from './pages/NotFound'
-
+import DocumentControl from './pages/operations/DocumentControl'
 import VendorControlLayout    from './pages/vendor-control/VendorControlLayout'
 import VendorControlDashboard from './pages/vendor-control/VendorControlDashboard'
 import StaffMaster            from './pages/vendor-control/StaffMaster'
@@ -81,7 +81,7 @@ export default function App() {
             <Route path="purchase-orders/:id"    element={<PODetail />}      />
             <Route path="deliveries"             element={<DeliveryList />}  />
             <Route path="payments"               element={<PaymentList />}   />
-
+            <Route path="operations/documents" element={<DocumentControl />} />
             {/* Operations */}
             <Route path="projects"               element={<ProjectList />}   />
             <Route path="projects/new"           element={<ProjectCreate />} />

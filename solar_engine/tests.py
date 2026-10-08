@@ -385,3 +385,250 @@ class AuthTests(TestCase):
     def test_templates_endpoint_requires_login(self):
         resp = self.client.get(reverse('solar-templates'))
         self.assertIn(resp.status_code, (302, 401, 403))
+
+
+class FreeIssueMaterialTests(TestCase):
+    """BOM / requisition / MIS validation for free-issue work packages."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+        from core.models import Vendor
+        cls.vendor = Vendor.objects.create(
+            vendor_id='VFI001', company_name='Free Issue Labour Co',
+            vendor_type='partner', vendor_category='sub-contractor', status='active',
+        )
+
+    def _free_issue_wp(self, mw='5'):
+        project = ProjectMaster.objects.create(project_name=f'FI {mw}', total_mw=Decimal(mw))
+        build = services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal(mw))
+        wp = build.stages.first().work_packages.first()
+        wp.engagement_type = wp.ENGAGEMENT_FREE_ISSUE
+        wp.assigned_vendor = self.vendor
+        wp.save()
+        return build, wp
+
+    def test_engagement_defaults_to_milestone(self):
+        project = ProjectMaster.objects.create(project_name='Def', total_mw=Decimal('5'))
+        build = services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        wp = build.stages.first().work_packages.first()
+        self.assertEqual(wp.engagement_type, wp.ENGAGEMENT_MILESTONE)
+        self.assertFalse(wp.is_free_issue)
+
+    def test_requisition_and_issue_within_bom(self):
+        from . import free_issue as fi
+        from .models import WorkPackageBom
+        _, wp = self._free_issue_wp()
+        bom = WorkPackageBom.objects.create(
+            work_package=wp, material_name='DCR Module 550Wp', unit='Nos',
+            bom_quantity=Decimal('100'), rate=Decimal('12'))
+        req = fi.create_requisition(wp, [{'bom_line': bom.id, 'quantity': '40'}], vendor=self.vendor)
+        self.assertEqual(req.lines.count(), 1)
+        self.assertTrue(req.requisition_no.startswith('REQ-'))
+        mis = fi.issue_material(wp, [{'bom_line': bom.id, 'quantity': '40'}], requisition=req)
+        self.assertTrue(mis.mis_no.startswith('MIS-'))
+        bom.refresh_from_db()
+        self.assertEqual(bom.issued_quantity, Decimal('40'))
+        self.assertEqual(bom.available_quantity, Decimal('60'))
+        req.refresh_from_db()
+        self.assertEqual(req.status, req.STATUS_ISSUED)
+
+    def test_issue_cannot_exceed_bom(self):
+        from . import free_issue as fi
+        from .models import WorkPackageBom
+        _, wp = self._free_issue_wp()
+        bom = WorkPackageBom.objects.create(
+            work_package=wp, material_name='AC Cable', unit='m', bom_quantity=Decimal('100'))
+        fi.issue_material(wp, [{'bom_line': bom.id, 'quantity': '70'}])
+        with self.assertRaises(services.EngineError):
+            fi.issue_material(wp, [{'bom_line': bom.id, 'quantity': '40'}])  # 70+40 > 100
+        bom.refresh_from_db()
+        self.assertEqual(bom.issued_quantity, Decimal('70'))  # second issue rolled back
+
+    def test_requisition_cannot_exceed_bom_balance(self):
+        from . import free_issue as fi
+        from .models import WorkPackageBom
+        _, wp = self._free_issue_wp()
+        bom = WorkPackageBom.objects.create(
+            work_package=wp, material_name='Earthing Strip', unit='m', bom_quantity=Decimal('50'))
+        with self.assertRaises(services.EngineError):
+            fi.create_requisition(wp, [{'bom_line': bom.id, 'quantity': '60'}])
+
+    def test_free_issue_actions_rejected_on_milestone_wp(self):
+        from . import free_issue as fi
+        from .models import WorkPackageBom
+        project = ProjectMaster.objects.create(project_name='MS', total_mw=Decimal('5'))
+        build = services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        wp = build.stages.first().work_packages.first()  # milestone by default
+        bom = WorkPackageBom.objects.create(
+            work_package=wp, material_name='X', bom_quantity=Decimal('10'))
+        with self.assertRaises(services.EngineError):
+            fi.issue_material(wp, [{'bom_line': bom.id, 'quantity': '1'}])
+
+    def test_seed_bom_from_boq_material_rows_only(self):
+        from . import free_issue as fi
+        build, wp = self._free_issue_wp()
+        material_rows = build.boq_items.filter(is_material=True).count()
+        created = fi.seed_bom_from_boq(wp)
+        self.assertEqual(len(created), material_rows)
+        self.assertTrue(all(b.source_boq_item_id for b in created))
+
+
+class FreeIssuePortalLockTests(TestCase):
+    """Field-portal MIS request lock: locked until labour work completes."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+        from core.models import Vendor
+        cls.vendor = Vendor.objects.create(
+            vendor_id='VPLK01', company_name='Lock Test Labour Co',
+            vendor_type='partner', vendor_category='sub-contractor', status='active')
+        project = ProjectMaster.objects.create(project_name='Lock FI', total_mw=Decimal('5'))
+        build = services.instantiate_build(project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        cls.wp = build.stages.first().work_packages.first()
+        cls.wp.engagement_type = cls.wp.ENGAGEMENT_FREE_ISSUE
+        cls.wp.assigned_vendor = cls.vendor
+        cls.wp.status = C.STATUS_IN_PROGRESS
+        cls.wp.save()
+        from .models import WorkPackageBom
+        cls.bom = WorkPackageBom.objects.create(
+            work_package=cls.wp, material_name='GI Strip', unit='m', bom_quantity=Decimal('100'))
+
+    def _issue(self, token='tok'):
+        import json
+        url = reverse('vp-issue-material') + f'?vendor_id={self.vendor.id}'
+        return self.client.post(
+            url, data=json.dumps({'work_package_id': self.wp.id,
+                                  'lines': [{'bom_line_id': self.bom.id, 'quantity': '10'}]}),
+            content_type='application/json', HTTP_X_FIELD_TOKEN=token)
+
+    def _pass_qa(self, fail=False):
+        """Attach a passed QA inspection (optionally with a failed checkpoint)."""
+        from .models import QualityInspection, QualityCheckpoint
+        insp = QualityInspection.objects.create(
+            build=self.wp.stage.build, work_package=self.wp, vendor=self.vendor,
+            site_name='Site', inspection_type='earth_continuity',
+            inspection_date=__import__('datetime').date.today(),
+            status=QualityInspection.STATUS_PASSED)
+        QualityCheckpoint.objects.create(
+            inspection=insp, order=1, parameter='Earth continuity',
+            result=QualityCheckpoint.RESULT_FAIL if fail else QualityCheckpoint.RESULT_PASS)
+        return insp
+
+    def test_mis_locked_until_labour_complete(self):
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            resp = self._issue()
+            self.assertEqual(resp.status_code, 403)
+            self.assertFalse(resp.json().get('mis_unlocked', True))
+        self.bom.refresh_from_db()
+        self.assertEqual(self.bom.issued_quantity, Decimal('0'))  # nothing issued while locked
+
+    def test_mis_still_locked_without_qa_even_if_completed(self):
+        """Gate 1 passes (completed) but gate 2 (QA) not met → still locked."""
+        self.wp.status = C.STATUS_COMPLETED
+        self.wp.save()
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            resp = self._issue()
+            self.assertEqual(resp.status_code, 403)
+            self.assertIn('QA', resp.json()['error'])
+        self.bom.refresh_from_db()
+        self.assertEqual(self.bom.issued_quantity, Decimal('0'))
+
+    def test_mis_locked_when_qa_has_failed_checkpoint(self):
+        self.wp.status = C.STATUS_COMPLETED
+        self.wp.save()
+        self._pass_qa(fail=True)  # passed inspection but a FAILED checkpoint
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            resp = self._issue()
+            self.assertEqual(resp.status_code, 403)
+            self.assertIn('checkpoints', resp.json()['error'])
+
+    def test_mis_unlocks_when_completed_and_qa_passed(self):
+        self.wp.status = C.STATUS_COMPLETED
+        self.wp.save()
+        self._pass_qa()  # labour complete AND QA passed
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            resp = self._issue()
+            self.assertEqual(resp.status_code, 201)
+            self.assertTrue(resp.json()['mis_no'].startswith('MIS-'))
+        self.bom.refresh_from_db()
+        self.assertEqual(self.bom.issued_quantity, Decimal('10'))
+
+    def test_open_critical_punch_blocks_mis(self):
+        from .models import PunchItem
+        self.wp.status = C.STATUS_COMPLETED
+        self.wp.save()
+        self._pass_qa()
+        PunchItem.objects.create(
+            build=self.wp.stage.build, work_package=self.wp, title='Loose bolt',
+            raised_on=__import__('datetime').date.today(),
+            status=PunchItem.STATUS_OPEN, severity=PunchItem.SEV_CRITICAL)
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            resp = self._issue()
+            self.assertEqual(resp.status_code, 403)
+            self.assertIn('punch', resp.json()['error'].lower())
+
+    def test_work_scope_exposes_engagement_and_lock(self):
+        with self.settings(FIELD_INGEST_TOKEN='tok'):
+            url = reverse('vp-work-scope') + f'?vendor_id={self.vendor.id}'
+            rows = self.client.get(url, HTTP_X_FIELD_TOKEN='tok').json()['work_scope']
+        row = next(r for r in rows if r['id'] == self.wp.id)
+        self.assertEqual(row['engagement_type'], 'free_issue')
+        self.assertTrue(row['is_free_issue'])
+        self.assertFalse(row['mis_unlocked'])  # in_progress → locked
+
+
+class DmsTests(TestCase):
+    """Engineering DMS: revision/version control + approval status sync."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.project = ProjectMaster.objects.create(project_name='DMS Proj', total_mw=Decimal('5'))
+
+    def _doc(self):
+        from .models import EngineeringDocument
+        from . import dms
+        doc = EngineeringDocument.objects.create(
+            project=self.project, doc_no='SLD-001', title='Main SLD',
+            discipline=EngineeringDocument.DISC_ELEC, category=EngineeringDocument.CAT_SLD)
+        dms.add_revision(doc, change_note='Initial issue')
+        return doc
+
+    def test_first_revision_is_r0_and_current(self):
+        doc = self._doc()
+        self.assertEqual(doc.revisions.count(), 1)
+        self.assertEqual(doc.current_revision.rev_no, 'R0')
+
+    def test_new_revision_supersedes_previous(self):
+        from . import dms
+        from .models import DocumentRevision
+        doc = self._doc()
+        r0 = doc.current_revision
+        r1 = dms.add_revision(doc, change_note='DISCOM comments incorporated')
+        doc.refresh_from_db(); r0.refresh_from_db()
+        self.assertEqual(r1.rev_no, 'R1')
+        self.assertEqual(doc.current_revision_id, r1.id)
+        self.assertEqual(r0.status, DocumentRevision.STATUS_SUPERSEDED)
+
+    def test_approve_current_revision_marks_document_approved(self):
+        from . import dms
+        from .models import EngineeringDocument, DocumentRevision
+        doc = self._doc()
+        dms.set_revision_status(doc.current_revision, DocumentRevision.STATUS_APPROVED)
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, EngineeringDocument.STATUS_APPROVED)
+        self.assertIsNotNone(doc.current_revision.approved_on)
+
+    def test_new_revision_after_approval_reopens_review(self):
+        from . import dms
+        from .models import EngineeringDocument, DocumentRevision
+        doc = self._doc()
+        dms.set_revision_status(doc.current_revision, DocumentRevision.STATUS_APPROVED)
+        dms.add_revision(doc, change_note='Rev for as-built')
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, EngineeringDocument.STATUS_IN_REVIEW)
+
+    def test_documents_endpoint_requires_login(self):
+        resp = self.client.get(reverse('solar-documents', args=[self.project.id]))
+        self.assertIn(resp.status_code, (302, 401, 403))

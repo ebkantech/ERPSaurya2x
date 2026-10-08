@@ -5,6 +5,8 @@ from . import quality_views as qv
 from . import budget_views as bv
 from . import dashboard_views as dv
 from . import vendor_portal as vp
+from . import free_issue_views as fiv
+from . import dms_views as dms
 
 urlpatterns = [
     # Vendor / subcontractor portal (token-auth, vendor-scoped, read-only)
@@ -12,6 +14,8 @@ urlpatterns = [
     path('portal/profile/', vp.vendor_profile, name='vp-profile'),
     path('portal/dashboard/', vp.vendor_dashboard, name='vp-dashboard'),
     path('portal/work-scope/', vp.vendor_work_scope, name='vp-work-scope'),
+    path('portal/free-issue/', vp.vendor_free_issue, name='vp-free-issue'),
+    path('portal/issue-material/', vp.vendor_issue_material, name='vp-issue-material'),
     path('portal/po-history/', vp.vendor_po_history, name='vp-po-history'),
     path('portal/materials/', vp.vendor_materials, name='vp-materials'),
     path('portal/logistics/', vp.vendor_logistics, name='vp-logistics'),
@@ -52,4 +56,13 @@ urlpatterns = [
     path('builds/<int:build_id>/sizing/', views.sizing_update_view, name='solar-build-sizing'),
     path('boq-items/<int:item_id>/', views.boq_item_update_view, name='solar-boq-item'),
     path('workpackages/<int:wp_id>/', views.workpackage_update_view, name='solar-workpackage'),
+    # Free-issue material: BOM, task-linked requisitions, Material Issue Slips (MIS)
+    path('workpackages/<int:wp_id>/free-issue/', fiv.work_package_free_issue_view, name='solar-wp-free-issue'),
+    path('workpackages/<int:wp_id>/requisitions/', fiv.requisitions_view, name='solar-wp-requisitions'),
+    path('workpackages/<int:wp_id>/issue-slips/', fiv.issue_slips_view, name='solar-wp-issue-slips'),
+    # Engineering & Document Management (DMS): documents, revisions, approvals
+    path('projects/<int:project_id>/documents/', dms.project_documents_view, name='solar-documents'),
+    path('projects/<int:project_id>/approvals/', dms.project_approvals_view, name='solar-approvals'),
+    path('documents/<int:doc_id>/revisions/', dms.document_revisions_view, name='solar-doc-revisions'),
+    path('revisions/<int:rev_id>/', dms.revision_detail_view, name='solar-revision'),
 ]

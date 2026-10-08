@@ -26,6 +26,7 @@ from core.views import (
     resend_vendor_registration_link,
     update_vendor,
     vendor_list_api,
+    vendor_detail_api,
 )
 from purchase_orders.views import (
     po_activity_create_api,
@@ -126,10 +127,16 @@ urlpatterns = [
     path('api/vendors/register/', register_vendor, name='api-vendor-register'),
     path('api/vendors/<str:vendor_id>/update/', update_vendor, name='api-vendor-update'),
     path('api/vendors/<str:vendor_id>/resend-link/', resend_vendor_registration_link, name='api-vendor-resend-link'),
+    path('api/vendors/<str:vendor_id>/', vendor_detail_api, name='api-vendor-detail'),
 
     # Vendor onboarding-fee payment gateway (Razorpay)
     path('api/payments/', include('payments.urls')),
     path('api/deliveries/', include('deliveries.urls')),
+    path('api/tasks/list/', __import__('tasks.views', fromlist=['tasks_list_api']).tasks_list_api, name='api-tasks-list'),
+    path('api/transport/list/', __import__('transport.views', fromlist=['transport_list_api']).transport_list_api, name='api-transport-list'),
+    path('api/notifications/list/', __import__('notifications.views', fromlist=['notifications_list_api']).notifications_list_api, name='api-notifications-list'),
+    path('api/admin/roles/', __import__('administration.views', fromlist=['admin_roles_api']).admin_roles_api, name='api-admin-roles'),
+    path('api/admin/audit-logs/', __import__('administration.views', fromlist=['admin_audit_logs_api']).admin_audit_logs_api, name='api-admin-audit'),
 
     # Solar project work-structure & BOQ engine
     path('api/solar/', include('solar_engine.urls')),
@@ -179,7 +186,6 @@ urlpatterns = [
     # Django backend modules (templates + JSON endpoints)
     path('administration/', include('administration.urls')),
     path('procurement/', include('purchase_orders.urls')),
-    path('procurement/vendors/', include('vendors.urls')),
     path('procurement/reports/', include('reports.urls')),
     path('vendor-control/', include('vendors.management_urls')),
 

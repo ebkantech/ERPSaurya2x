@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import {
   Sun, Zap, Loader2, Lock, CheckCircle2, LayoutList, Table2, Gauge,
   AlertTriangle, ArrowLeft, Sparkles, FileText, HardHat, Plus, Trash2, Unlock,
-  Receipt, FileCheck, IndianRupee,
+  Receipt, FileCheck, IndianRupee, Package, X,
 } from 'lucide-react'
 import api from '../../services/api'
 
@@ -13,6 +13,12 @@ const STATUS_OPTIONS = [
   ['completed', 'Completed'],
   ['on_hold', 'On Hold'],
   ['skipped', 'Skipped'],
+]
+
+// How a vendor is engaged on a work package (set at work-mapping time).
+const ENGAGEMENT_OPTIONS = [
+  ['milestone', 'On milestones'],
+  ['free_issue', 'Free-issue material'],
 ]
 
 const money = (v) => Number(v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -179,7 +185,7 @@ function EditableText({ value, onSave, editable, className = '', placeholder = '
 
 function WbsTab({
   stages, editable, vendors, library,
-  onWpStatus, onWpVendor, onStageDates,
+  onWpStatus, onWpVendor, onWpEngagement, onManageFreeIssue, onStageDates,
   onAddStage, onRenameStage, onDeleteStage, onReorderStages,
   onAddWp, onRenameWp, onDeleteWp, onMoveWp, onReorderWps,
 }) {
@@ -266,6 +272,24 @@ function WbsTab({
                   <option value="">Unassigned</option>
                   {vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
                 </select>
+                {wp.assigned_vendor_id && (
+                  <select value={wp.engagement_type || 'milestone'}
+                    onChange={e => onWpEngagement(stage.id, wp.id, e.target.value)}
+                    title="How this vendor is engaged on this work package"
+                    className={`text-xs border rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-brand-500 ${
+                      wp.engagement_type === 'free_issue'
+                        ? 'border-amber-300 bg-amber-50 text-amber-800'
+                        : 'border-surface-200 text-slate-600'}`}>
+                    {ENGAGEMENT_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                )}
+                {wp.engagement_type === 'free_issue' && (
+                  <button type="button" onClick={() => onManageFreeIssue(wp)}
+                    title="Manage BOM, requisitions & material issue slips"
+                    className="text-xs text-amber-700 hover:text-amber-900 font-medium flex items-center gap-1">
+                    <Package size={12} />MIS / BOM
+                  </button>
+                )}
                 <select value={wp.status}
                   onChange={e => onWpStatus(stage.id, wp.id, e.target.value)}
                   className="text-xs border border-surface-200 rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-brand-500">
@@ -774,6 +798,177 @@ function BillingTab({ build }) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Free-issue material modal — BOM, task-linked requisitions, Material Issue
+// Slips (MIS). Opened for a work package whose engagement_type is free_issue.
+// ---------------------------------------------------------------------------
+function FreeIssueModal({ wp, vendors, onClose }) {
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [reqLines, setReqLines] = useState({})   // bomLineId -> qty for requisition
+  const [misLines, setMisLines] = useState({})   // bomLineId -> qty for issue slip
+  const [newLine, setNewLine] = useState({ material_name: '', unit: 'Nos', bom_quantity: '', rate: '' })
+
+  const load = () => api.get(`/solar/workpackages/${wp.id}/free-issue/`)
+    .then(r => setData(r.data)).catch(e => setErr(e.response?.data?.error || 'Failed to load'))
+  useEffect(() => { load() }, [wp.id])
+
+  const act = async (fn) => {
+    setErr(''); setBusy(true)
+    try { await fn() ; await load() }
+    catch (e) { setErr(e.response?.data?.error || 'Action failed') }
+    finally { setBusy(false) }
+  }
+
+  const seedBom = () => act(() => api.post(`/solar/workpackages/${wp.id}/free-issue/`, { action: 'seed_bom' }))
+  const addLine = () => act(async () => {
+    if (!newLine.material_name.trim()) throw { response: { data: { error: 'Material name is required.' } } }
+    await api.post(`/solar/workpackages/${wp.id}/free-issue/`, { action: 'add_bom_line', ...newLine })
+    setNewLine({ material_name: '', unit: 'Nos', bom_quantity: '', rate: '' })
+  })
+  const raiseReq = () => act(async () => {
+    const lines = Object.entries(reqLines).filter(([, q]) => Number(q) > 0)
+      .map(([bom_line_id, quantity]) => ({ bom_line_id: Number(bom_line_id), quantity }))
+    if (!lines.length) throw { response: { data: { error: 'Enter a quantity on at least one line.' } } }
+    await api.post(`/solar/workpackages/${wp.id}/requisitions/`, { lines })
+    setReqLines({})
+  })
+  const issueMis = () => act(async () => {
+    const lines = Object.entries(misLines).filter(([, q]) => Number(q) > 0)
+      .map(([bom_line_id, quantity]) => ({ bom_line_id: Number(bom_line_id), quantity }))
+    if (!lines.length) throw { response: { data: { error: 'Enter a quantity on at least one line.' } } }
+    await api.post(`/solar/workpackages/${wp.id}/issue-slips/`, { lines })
+    setMisLines({})
+  })
+
+  const bom = data?.bom || []
+  const hasBom = bom.length > 0
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto py-8 px-4">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-surface-100">
+          <div>
+            <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+              <Package size={16} className="text-amber-600" />Free-Issue Material · {wp.name}
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Company supplies material; vendor does labour, machinery &amp; installation only.
+              {data?.vendor ? ` Vendor: ${data.vendor}.` : ''}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700"><X size={18} /></button>
+        </div>
+
+        <div className="p-5 space-y-6">
+          {err && <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg px-3 py-2">{err}</div>}
+
+          {/* Bill of material */}
+          <section>
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-sm font-semibold text-slate-800">Bill of Material (BOM)</h4>
+              <button onClick={seedBom} disabled={busy}
+                className="btn-secondary !text-xs !py-1">Seed from BOQ material rows</button>
+            </div>
+            <table className="data-table text-xs">
+              <thead><tr>
+                <th>Material</th><th>Unit</th><th className="text-right">BOM</th>
+                <th className="text-right">Requested</th><th className="text-right">Issued</th>
+                <th className="text-right">Available</th>
+              </tr></thead>
+              <tbody>
+                {!hasBom && <tr><td colSpan={6} className="text-center text-slate-400 py-4">
+                  No BOM lines yet. Seed from the BOQ or add a line below.</td></tr>}
+                {bom.map(b => (
+                  <tr key={b.id}>
+                    <td className="font-medium text-slate-700">{b.material_name}</td>
+                    <td>{b.unit}</td>
+                    <td className="text-right">{b.bom_quantity}</td>
+                    <td className="text-right text-slate-500">{b.requested_quantity}</td>
+                    <td className="text-right text-slate-500">{b.issued_quantity}</td>
+                    <td className={`text-right font-semibold ${Number(b.available_quantity) <= 0 ? 'text-slate-400' : 'text-green-600'}`}>{b.available_quantity}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {/* add BOM line */}
+            <div className="flex flex-wrap items-end gap-2 mt-3">
+              <input placeholder="Material name" value={newLine.material_name}
+                onChange={e => setNewLine(l => ({ ...l, material_name: e.target.value }))}
+                className="flex-1 min-w-[160px] text-xs border border-surface-200 rounded-md px-2 py-1" />
+              <input placeholder="Unit" value={newLine.unit}
+                onChange={e => setNewLine(l => ({ ...l, unit: e.target.value }))}
+                className="w-20 text-xs border border-surface-200 rounded-md px-2 py-1" />
+              <input placeholder="BOM qty" type="number" value={newLine.bom_quantity}
+                onChange={e => setNewLine(l => ({ ...l, bom_quantity: e.target.value }))}
+                className="w-24 text-xs border border-surface-200 rounded-md px-2 py-1" />
+              <input placeholder="Rate" type="number" value={newLine.rate}
+                onChange={e => setNewLine(l => ({ ...l, rate: e.target.value }))}
+                className="w-24 text-xs border border-surface-200 rounded-md px-2 py-1" />
+              <button onClick={addLine} disabled={busy} className="btn-secondary !text-xs !py-1"><Plus size={12} />Add line</button>
+            </div>
+          </section>
+
+          {hasBom && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Requisition */}
+              <section>
+                <h4 className="text-sm font-semibold text-slate-800 mb-2">Raise material requisition</h4>
+                <p className="text-xs text-slate-400 mb-2">Task-linked to this work package. Validated against the BOM balance.</p>
+                <div className="space-y-1.5">
+                  {bom.map(b => (
+                    <div key={b.id} className="flex items-center gap-2 text-xs">
+                      <span className="flex-1 truncate">{b.material_name}</span>
+                      <input type="number" placeholder={`≤ ${b.available_quantity}`} value={reqLines[b.id] || ''}
+                        onChange={e => setReqLines(s => ({ ...s, [b.id]: e.target.value }))}
+                        className="w-24 border border-surface-200 rounded-md px-2 py-1" />
+                      <span className="w-8 text-slate-400">{b.unit}</span>
+                    </div>
+                  ))}
+                </div>
+                <button onClick={raiseReq} disabled={busy} className="btn-secondary !text-xs !py-1 mt-2"><Receipt size={12} />Raise requisition</button>
+                <ul className="mt-3 space-y-1">
+                  {(data?.requisitions || []).map(r => (
+                    <li key={r.id} className="text-xs text-slate-500 flex justify-between">
+                      <span>{r.requisition_no}</span><span className="badge badge-slate">{r.status_display}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+
+              {/* Issue slip */}
+              <section>
+                <h4 className="text-sm font-semibold text-slate-800 mb-2">Issue material (MIS)</h4>
+                <p className="text-xs text-slate-400 mb-2">Store issues material to the vendor. Cannot exceed the BOM.</p>
+                <div className="space-y-1.5">
+                  {bom.map(b => (
+                    <div key={b.id} className="flex items-center gap-2 text-xs">
+                      <span className="flex-1 truncate">{b.material_name}</span>
+                      <input type="number" placeholder={`≤ ${b.available_quantity}`} value={misLines[b.id] || ''}
+                        onChange={e => setMisLines(s => ({ ...s, [b.id]: e.target.value }))}
+                        className="w-24 border border-surface-200 rounded-md px-2 py-1" />
+                      <span className="w-8 text-slate-400">{b.unit}</span>
+                    </div>
+                  ))}
+                </div>
+                <button onClick={issueMis} disabled={busy} className="btn-primary !text-xs !py-1 mt-2"><Package size={12} />Issue material</button>
+                <ul className="mt-3 space-y-1">
+                  {(data?.issue_slips || []).map(m => (
+                    <li key={m.id} className="text-xs text-slate-500 flex justify-between">
+                      <span>{m.mis_no}</span><span className="badge badge-green">{m.status_display}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ProjectWorkStructure() {
   const { projectId } = useParams()
   const [build, setBuild] = useState(null)
@@ -786,6 +981,7 @@ export default function ProjectWorkStructure() {
   const [vendors, setVendors] = useState([])
   const [library, setLibrary] = useState({ stage_names: [], work_package_names: [] })
   const [readiness, setReadiness] = useState(null)
+  const [freeIssueWp, setFreeIssueWp] = useState(null)  // WP open in the free-issue (BOM/MIS) modal
 
   const load = async () => {
     setLoading(true); setError('')
@@ -857,6 +1053,17 @@ export default function ProjectWorkStructure() {
 
   const setWpVendor = async (stageId, wpId, vendorId) => {
     const res = await api.patch(`/solar/workpackages/${wpId}/`, { assigned_vendor_id: vendorId || '' })
+    const updated = res.data.work_package
+    setBuild(b => ({
+      ...b,
+      stages: b.stages.map(s => s.id !== stageId ? s : {
+        ...s, work_packages: s.work_packages.map(w => w.id === wpId ? updated : w),
+      }),
+    }))
+  }
+
+  const setWpEngagement = async (stageId, wpId, engagement_type) => {
+    const res = await api.patch(`/solar/workpackages/${wpId}/`, { engagement_type })
     const updated = res.data.work_package
     setBuild(b => ({
       ...b,
@@ -973,10 +1180,12 @@ export default function ProjectWorkStructure() {
           {tab === 'sizing' && <SizingTab sizing={build.sizing} />}
           {tab === 'wbs' && <WbsTab
             stages={build.stages || []} editable={build.is_editable} vendors={vendors} library={library}
-            onWpStatus={setWpStatus} onWpVendor={setWpVendor} onStageDates={setStageDates}
+            onWpStatus={setWpStatus} onWpVendor={setWpVendor} onWpEngagement={setWpEngagement}
+            onManageFreeIssue={setFreeIssueWp} onStageDates={setStageDates}
             onAddStage={addStage} onRenameStage={renameStage} onDeleteStage={deleteStage} onReorderStages={reorderStages}
             onAddWp={addWp} onRenameWp={renameWp} onDeleteWp={deleteWp} onMoveWp={moveWp} onReorderWps={reorderWps}
           />}
+          {freeIssueWp && <FreeIssueModal wp={freeIssueWp} vendors={vendors} onClose={() => setFreeIssueWp(null)} />}
           {tab === 'boq' && <BoqTab sections={build.boq_sections || []} editable={build.is_editable} onItemSave={saveItem} />}
           {tab === 'billing' && <BillingTab build={build} />}
 

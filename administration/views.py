@@ -793,3 +793,46 @@ def master_data_api(request):
         return redirect_response
     rows = [serialize_master_data(row) for row in MasterDataEntry.objects.order_by('master_type', 'display_order', 'name')]
     return JsonResponse({'results': rows})
+
+
+# --- Admin JSON APIs for the React Admin panel ---------------------------
+from permissions.utils import require_authenticated as _req_auth  # noqa: E402
+
+
+def admin_roles_api(request):
+    redirect = _req_auth(request)
+    if redirect:
+        return redirect
+    from django.contrib.auth import get_user_model
+    from permissions.models import RolePermission
+    User = get_user_model()
+    roles = {}
+    for rp in RolePermission.objects.all():
+        r = roles.setdefault(rp.role, {'role': rp.role, 'modules': 0, 'can_approve': False})
+        r['modules'] += 1
+        if rp.can_approve:
+            r['can_approve'] = True
+    try:
+        from accounts.models import StaffProfile
+        counts = {}
+        for sp in StaffProfile.objects.all():
+            counts[sp.role] = counts.get(sp.role, 0) + 1
+    except Exception:
+        counts = {}
+    rows = [{'role': k, 'modules': v['modules'], 'users': counts.get(k, 0),
+             'can_approve': v['can_approve']} for k, v in sorted(roles.items())]
+    return JsonResponse({'roles': rows})
+
+
+def admin_audit_logs_api(request):
+    redirect = _req_auth(request)
+    if redirect:
+        return redirect
+    from .models import SystemAuditLog
+    qs = SystemAuditLog.objects.select_related('user').order_by('-created_at')[:100]
+    rows = [{
+        'id': a.id, 'user': (a.user.get_full_name() or a.user.username) if a.user_id else 'System',
+        'action': a.action, 'module': a.module, 'description': a.description,
+        'ip': a.ip_address, 'time': a.created_at.strftime('%d %b %Y, %I:%M %p') if a.created_at else '',
+    } for a in qs]
+    return JsonResponse({'audit_logs': rows})

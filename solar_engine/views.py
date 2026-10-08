@@ -210,6 +210,11 @@ def workpackage_update_view(request, wp_id):
         if vid and not Vendor.objects.filter(pk=vid).exists():
             return JsonResponse({'error': 'Vendor not found.'}, status=400)
         wp.assigned_vendor_id = vid
+    if 'engagement_type' in data:
+        et = (data['engagement_type'] or '').strip()
+        if et not in dict(ProjectWorkPackage.ENGAGEMENT_CHOICES):
+            return JsonResponse({'error': 'Invalid engagement type.'}, status=400)
+        wp.engagement_type = et
     wp.save()
     return JsonResponse({'message': 'Work package updated.', 'work_package': serialize_work_package(wp)})
 

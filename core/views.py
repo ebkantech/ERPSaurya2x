@@ -301,6 +301,31 @@ def vendor_list_api(request):
 
 
 @login_required(login_url='/admin/login/')
+def vendor_detail_api(request, vendor_id):
+    """GET -> one vendor's full detail + recent POs (for the Vendor detail page)."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    vendor = Vendor.objects.filter(vendor_id=vendor_id).first()
+    if not vendor:
+        return JsonResponse({'error': 'Vendor not found'}, status=404)
+    data = _serialize_vendor_detail(vendor)
+    data['id'] = vendor.id
+    data['mobile_number'] = vendor.mobile_number or ''
+    data['status'] = vendor.status or ''
+    try:
+        from purchase_orders.models import PurchaseOrder
+        pos = PurchaseOrder.objects.filter(vendor=vendor).order_by('-po_date')[:10]
+        data['recent_pos'] = [{
+            'po_number': p.po_number, 'project': p.project_site_name,
+            'value': str(p.total_po_value), 'paid': str(p.paid_amount),
+            'outstanding': str(p.outstanding_amount), 'status': p.status,
+            'date': p.po_date.isoformat() if p.po_date else '',
+        } for p in pos]
+    except Exception:
+        data['recent_pos'] = []
+    return JsonResponse({'vendor': data})
+
+
 def resend_vendor_registration_link(request, vendor_id):
     """POST → mint a fresh Razorpay Payment Link for an already-saved vendor who
     hasn't paid the onboarding fee yet, and let Razorpay email it. Used by the
@@ -537,151 +562,6 @@ def _validate_vendor_payload(payload, files, require_file):
         'client_list_data': json.dumps(cleaned_clients),
     }
     return cleaned_data, errors
-
-
-@login_required(login_url='/admin/login/')
-def vendor_module(request):
-    vendor_count = Vendor.objects.count()
-    recent_count = Vendor.objects.order_by('-created_at')[:5].count()
-    context = {
-        'page_title': 'Vendor Module',
-        'vendor_module_nav': True,
-        'vendor_count': vendor_count,
-        'recent_count': recent_count,
-    }
-    return render(request, 'vendor_module.html', context)
-
-
-@login_required(login_url='/admin/login/')
-def project_module(request):
-    project_count = ProjectMaster.objects.count()
-    active_count = ProjectMaster.objects.filter(status='active').count()
-    allocation_count = ProjectWorkAllocation.objects.count()
-    total_capacity = sum(
-        [project.total_mw or Decimal('0') for project in ProjectMaster.objects.all()],
-        Decimal('0')
-    )
-    context = {
-        'page_title': 'Project Module',
-        'project_module_nav': True,
-        'project_count': project_count,
-        'active_count': active_count,
-        'allocation_count': allocation_count,
-        'total_capacity': total_capacity,
-        'business_unit_count': BusinessUnit.objects.filter(is_active=True).count(),
-    }
-    return render(request, 'project_module.html', context)
-
-
-@login_required(login_url='/admin/login/')
-def project_master(request):
-    projects = ProjectMaster.objects.order_by('-created_at')
-    context = {
-        'page_title': 'Project Master',
-        'project_module_nav': True,
-        'projects': _serialize_project_rows(projects),
-        'project_count': projects.count(),
-        'business_units': _get_business_unit_names(),
-    }
-    return render(request, 'project_master.html', context)
-
-
-@login_required(login_url='/admin/login/')
-def project_distribution(request):
-    projects = ProjectMaster.objects.order_by('-created_at')
-    selected_project = projects.first()
-    vendors = list(
-        Vendor.objects.order_by('company_name').values('vendor_id', 'company_name', 'vendor_category')
-    )
-    work_packages = list(
-        WorkPackage.objects.filter(is_active=True).order_by('display_order', 'id').values('id', 'name')
-    )
-    allocation_map = {
-        str(project.id): _serialize_project_allocations(project)
-        for project in projects
-    }
-    context = {
-        'page_title': 'Vendor Distribution',
-        'project_module_nav': True,
-        'projects': _serialize_project_rows(projects),
-        'selected_project': selected_project,
-        'selected_allocations': _serialize_project_allocations(selected_project) if selected_project else [],
-        'allocation_map': allocation_map,
-        'vendor_options': vendors,
-        'work_packages': work_packages,
-        'business_units': _get_business_unit_names(),
-    }
-    return render(request, 'project_distribution.html', context)
-
-
-@login_required(login_url='/admin/login/')
-def vendor_list(request):
-    vendors = Vendor.objects.order_by('-created_at')
-    context = {
-        'page_title': 'Vendor List',
-        'vendor_module_nav': True,
-        'vendors': vendors,
-        'vendor_detail_rows': _serialize_vendor_detail_rows(vendors),
-    }
-    return render(request, 'vendor_list.html', context)
-
-
-@login_required(login_url='/admin/login/')
-def vendor_registration(request):
-    return render(request, 'vendor_registration.html', {'page_title': 'Vendor Registration', 'vendor_module_nav': True})
-
-
-@login_required(login_url='/admin/login/')
-@login_required(login_url='/admin/login/')
-def material_module(request):
-    material_count = MaterialMaster.objects.count()
-    work_type_count = WorkPackage.objects.filter(is_active=True).count()
-    unique_units = sorted({item.qty_specification for item in MaterialMaster.objects.exclude(qty_specification='')})
-    context = {
-        'page_title': 'Material Master',
-        'material_module_nav': True,
-        'material_count': material_count,
-        'work_type_count': work_type_count,
-        'unit_count': len(unique_units),
-        'quotation_count': MaterialQuotation.objects.count(),
-    }
-    return render(request, 'material_module.html', context)
-
-
-@login_required(login_url='/admin/login/')
-@ensure_csrf_cookie
-def material_master(request):
-    material_rows = _serialize_material_rows(MaterialMaster.objects.order_by('id'))
-    work_packages = _get_work_package_names()
-    context = {
-        'page_title': 'Material Master',
-        'material_module_nav': True,
-        'material_import_columns': [label for _key, label in MATERIAL_IMPORT_SCHEMA],
-        'work_types': work_packages,
-        'material_rows': material_rows,
-        'material_groups': _group_material_rows(material_rows),
-        'imported_material_rows': _build_material_import_rows(material_rows),
-        'imported_material_count': len(material_rows),
-    }
-    return render(request, 'material_master.html', context)
-
-
-@login_required(login_url='/admin/login/')
-def material_quotation(request):
-    vendors = list(
-        Vendor.objects.order_by('company_name').values('vendor_id', 'company_name', 'vendor_category')
-    )
-    materials = _serialize_material_rows(MaterialMaster.objects.order_by('id'))
-    work_packages = _get_work_package_names()
-    context = {
-        'page_title': 'Material Quotation Generator',
-        'material_module_nav': True,
-        'materials': materials,
-        'work_types': work_packages,
-        'vendor_options': vendors,
-        'business_units': _get_business_unit_names(),
-    }
-    return render(request, 'material_quotation.html', context)
 
 
 @login_required(login_url='/admin/login/')

@@ -9,6 +9,9 @@ from django.views.decorators.csrf import csrf_exempt
 
 from core.models import Vendor
 from . import billing as _billing
+from . import constants as C
+from . import free_issue as _fi
+from .services import EngineError
 from .models import BillingMilestone, ProjectBuild, ProjectWorkPackage, SiteProgressEntry
 from .serializers import serialize_milestone
 
@@ -130,15 +133,115 @@ def vendor_work_scope(request):
     for e in SiteProgressEntry.objects.filter(work_package__assigned_vendor=v):
         if (e.progress_percent or 0) > prog.get(e.work_package_id, 0):
             prog[e.work_package_id] = float(e.progress_percent or 0)
-    rows = [{
-        'id': w.id, 'name': w.name, 'stage': w.stage.name if w.stage_id else '',
-        'project': getattr(w.stage.build.project, 'project_name', '') if w.stage_id else '',
-        'project_code': getattr(w.stage.build.project, 'project_code', '') if w.stage_id else '',
-        'status': w.status, 'progress_percent': prog.get(w.id, 0),
-        'planned_start': w.stage.planned_start.isoformat() if w.stage_id and w.stage.planned_start else '',
-        'planned_end': w.stage.planned_end.isoformat() if w.stage_id and w.stage.planned_end else '',
-    } for w in wps]
+    rows = []
+    for w in wps:
+        mis_open, mis_reason = (_fi.material_window_state(w) if w.is_free_issue else (False, ''))
+        rows.append({
+            'id': w.id, 'name': w.name, 'stage': w.stage.name if w.stage_id else '',
+            'project': getattr(w.stage.build.project, 'project_name', '') if w.stage_id else '',
+            'project_code': getattr(w.stage.build.project, 'project_code', '') if w.stage_id else '',
+            'status': w.status, 'progress_percent': prog.get(w.id, 0),
+            'planned_start': w.stage.planned_start.isoformat() if w.stage_id and w.stage.planned_start else '',
+            'planned_end': w.stage.planned_end.isoformat() if w.stage_id and w.stage.planned_end else '',
+            # Engagement model, shown in the field portal.
+            'engagement_type': w.engagement_type,
+            'engagement_display': w.get_engagement_type_display(),
+            'is_free_issue': w.is_free_issue,
+            # MIS request unlocks on labour completion AND QA/QC approval.
+            'mis_unlocked': mis_open,
+            'mis_lock_reason': mis_reason,
+        })
     return JsonResponse({'work_scope': rows})
+
+
+def _json_body(request):
+    import json
+    try:
+        return json.loads(request.body or '{}')
+    except (ValueError, TypeError):
+        return {}
+
+
+def _vendor_rw(request, body):
+    """Resolve the vendor for a write request — vendor_id from the query
+    string (set by the Next.js proxy) or the JSON body."""
+    vid = request.GET.get('vendor_id') or body.get('vendor_id') or ''
+    return Vendor.objects.filter(pk=vid).first() if vid else None
+
+
+def vendor_free_issue(request):
+    """GET ?vendor_id=&work_package_id= → the free-issue material picture for
+    one of the vendor's work packages: BOM balances, issued slips and whether
+    the MIS request is unlocked (labour work complete)."""
+    err = _check_token(request)
+    if err:
+        return err
+    v = _vendor(request)
+    if not v:
+        return JsonResponse({'error': 'vendor_id required / not found.'}, status=400)
+    wp = ProjectWorkPackage.objects.filter(
+        pk=request.GET.get('work_package_id') or 0, assigned_vendor=v).first()
+    if not wp:
+        return JsonResponse({'error': 'Work package not found for this vendor.'}, status=404)
+    if not wp.is_free_issue:
+        return JsonResponse({'error': 'This work package is not on free-issue material.'}, status=400)
+
+    mis_open, mis_reason = _fi.material_window_state(wp)
+    bom = [{k: (str(val) if hasattr(val, 'quantize') else val) for k, val in b.items()}
+           for b in _fi.bom_balance(wp)]
+    issued = [{
+        'mis_no': m.mis_no, 'issued_on': m.issued_on.isoformat() if m.issued_on else '',
+        'status': m.get_status_display(),
+        'lines': [{'material_name': l.material_name, 'unit': l.unit,
+                   'quantity_issued': str(l.quantity_issued)} for l in m.lines.all()],
+    } for m in wp.issue_slips.all()]
+    return JsonResponse({
+        'work_package': wp.name, 'work_package_id': wp.id, 'status': wp.status,
+        'mis_unlocked': mis_open,
+        'mis_lock_reason': mis_reason,
+        'bom': bom, 'issue_slips': issued,
+    })
+
+
+@csrf_exempt
+def vendor_issue_material(request):
+    """POST → the vendor issues material against the BOM (records an MIS).
+    body: {vendor_id, work_package_id, note?, lines:[{bom_line_id, quantity}]}
+    Locked unless the work package's labour work is complete (status=Completed)."""
+    err = _check_token(request)
+    if err:
+        return err
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    body = _json_body(request)
+    v = _vendor_rw(request, body)
+    if not v:
+        return JsonResponse({'error': 'vendor_id required / not found.'}, status=400)
+    wp = ProjectWorkPackage.objects.filter(
+        pk=body.get('work_package_id') or 0, assigned_vendor=v).first()
+    if not wp:
+        return JsonResponse({'error': 'Work package not found for this vendor.'}, status=404)
+    if not wp.is_free_issue:
+        return JsonResponse({'error': 'This work package is not on free-issue material.'}, status=400)
+    # The lock: MIS request stays closed until labour work is complete AND the
+    # QA/QC checklist is approved (two-condition gate).
+    is_open, reason = _fi.material_window_state(wp)
+    if not is_open:
+        return JsonResponse({'error': reason, 'mis_unlocked': False}, status=403)
+
+    lines = [{'bom_line': l.get('bom_line_id'), 'quantity': l.get('quantity')}
+             for l in (body.get('lines') or [])]
+    try:
+        mis = _fi.issue_material(
+            wp, lines, vendor=v, note=body.get('note') or '',
+            issued_by_name=(v.company_name or v.vendor_id or 'Vendor'))
+    except EngineError as e:
+        return JsonResponse({'error': str(e)}, status=400)
+    return JsonResponse({
+        'message': f'Material issued — {mis.mis_no}.', 'mis_no': mis.mis_no,
+        'bom': [{k: (str(val) if hasattr(val, 'quantize') else val) for k, val in b.items()}
+                for b in _fi.bom_balance(wp)],
+    }, status=201)
 
 
 def vendor_po_history(request):

@@ -2,11 +2,11 @@ import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import clsx from 'clsx'
-import { ShieldCheck,
+import {
   LayoutDashboard, Building2, ShoppingCart, Truck, CreditCard,
   FolderKanban, Package, BarChart3, Settings, LogOut, Zap,
   ChevronRight, ArrowLeftRight, Bell, ClipboardList, Sparkles, PackageSearch,
-  Users as UsersIcon, HardHat,Wallet,
+  Users as UsersIcon, HardHat, ShieldCheck, Wallet, FileText,
 } from 'lucide-react'
 
 const navGroups = [
@@ -23,6 +23,7 @@ const navGroups = [
       { label: 'Purchase Orders',  icon: ShoppingCart, path: '/purchase-orders' },
       { label: 'Deliveries',       icon: Truck,        path: '/deliveries' },
       { label: 'Payments',         icon: CreditCard,   path: '/payments' },
+      { label: 'Documents (DMS)', icon: FileText, path: '/operations/documents' },
     ],
   },
   {
