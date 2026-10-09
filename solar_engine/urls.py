@@ -7,6 +7,8 @@ from . import dashboard_views as dv
 from . import vendor_portal as vp
 from . import free_issue_views as fiv
 from . import dms_views as dms
+from . import work_order_views as wov
+from . import site_views as sv
 
 urlpatterns = [
     # Vendor / subcontractor portal (token-auth, vendor-scoped, read-only)
@@ -35,6 +37,7 @@ urlpatterns = [
     path('milestones/<int:milestone_id>/', views.milestone_detail_view, name='solar-milestone'),
     path('builds/<int:build_id>/handover-certificates/', views.build_certificates_view, name='solar-certificates'),
     path('handover-certificates/<int:cert_id>/pdf/', views.certificate_pdf_view, name='solar-certificate-pdf'),
+    path('projects/<int:project_id>/site-readiness/', views.site_readiness_view, name='solar-site-readiness'),
     path('projects/<int:project_id>/build/', views.project_build_view, name='solar-project-build'),
     path('projects/<int:project_id>/progress/', views.project_progress_view, name='solar-project-progress'),
     path('dashboard/', dv.dashboard_view, name='solar-dashboard'),
@@ -65,4 +68,13 @@ urlpatterns = [
     path('projects/<int:project_id>/approvals/', dms.project_approvals_view, name='solar-approvals'),
     path('documents/<int:doc_id>/revisions/', dms.document_revisions_view, name='solar-doc-revisions'),
     path('revisions/<int:rev_id>/', dms.revision_detail_view, name='solar-revision'),
+    path('approvals/<int:approval_id>/', dms.approval_detail_view, name='solar-approval'),
+    path('projects/<int:project_id>/readiness/', dms.project_readiness_view, name='solar-readiness'),
+    # Sites / locations — per-location assessment & NOC compliance
+    path('projects/<int:project_id>/sites/', sv.project_sites_view, name='solar-sites'),
+    path('sites/<int:site_id>/', sv.site_detail_view, name='solar-site'),
+    path('assessment-items/<int:item_id>/', sv.site_assessment_detail_view, name='solar-assessment-item'),
+    # Subcontractor Work Orders
+    path('projects/<int:project_id>/work-orders/', wov.project_work_orders_view, name='solar-work-orders'),
+    path('work-orders/<int:wo_id>/', wov.work_order_detail_view, name='solar-work-order'),
 ]

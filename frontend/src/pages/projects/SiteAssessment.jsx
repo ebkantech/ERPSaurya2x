@@ -1,294 +1,203 @@
-import React, { useState, useEffect, useCallback } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { ChevronLeft, Loader2, FileText, Upload, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import React, { useState, useEffect } from 'react'
+import {
+  MapPin, Loader2, FolderKanban, Zap, Plus, ChevronRight, ChevronDown,
+  CheckCircle2, Lock, ShieldCheck, ClipboardCheck,
+} from 'lucide-react'
 import api from '../../services/api'
 
-const STATUS_META = {
-  cleared:  { badge: 'badge-green', label: 'Cleared' },
-  uploaded: { badge: 'badge-amber', label: 'Awaiting sign-off' },
-  rejected: { badge: 'badge-red',   label: 'Rejected' },
-  pending:  { badge: 'badge-slate', label: 'Pending' },
+const siteBadge = {
+  pending: 'badge-slate', in_assessment: 'badge-amber', cleared: 'badge-green', on_hold: 'badge-red',
 }
+const ASSESS_STATUS = ['pending', 'submitted', 'cleared', 'rejected', 'waived']
+const NOC_STATUS = ['pending', 'submitted', 'approved', 'rejected', 'resubmit', 'waived']
 
-const rowTone = (item) => {
-  if (item.status === 'cleared') return ''
-  if (!item.is_mandatory) return ''
-  if (item.status === 'pending') return 'bg-red-50/60'
-  return 'bg-amber-50/60'
+function Stat({ icon: Icon, label, value, tone = 'text-slate-900' }) {
+  return (
+    <div className="card p-4">
+      <div className="flex items-center gap-2 text-slate-400 text-xs font-medium mb-1"><Icon size={13} />{label}</div>
+      <p className={`text-2xl font-bold ${tone}`}>{value}</p>
+    </div>
+  )
 }
-
-const fmtMw = (v) => (v === '' || v === null || v === undefined ? '—' : `${Number(v).toFixed(2)} MWp`)
-const today = () => new Date().toISOString().slice(0, 10)
 
 export default function SiteAssessment() {
-  const { projectId, siteId } = useParams()
-  const [site, setSite] = useState(null)
-  const [project, setProject] = useState(null)
-  const [rows, setRows] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [saving, setSaving] = useState(null)
-  const [editing, setEditing] = useState(null)
-  const [draft, setDraft] = useState({ fileName: '', signedBy: '', verifiedBy: '' })
+  const [projects, setProjects] = useState([])
+  const [projectId, setProjectId] = useState('')
+  const [data, setData] = useState(null)   // {sites, project_total_mw, readiness}
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState('')
+  const [open, setOpen] = useState(null)   // expanded site id
+  const [showNew, setShowNew] = useState(false)
+  const [form, setForm] = useState({ site_name: '', location: '', capacity_mw: '', apply_checklists: true })
 
-  const load = useCallback(() => {
-    let active = true
-    setLoading(true)
-    api.get(`/sites/${siteId}/`)
-      .then(res => {
-        if (!active) return
-        setSite(res.data.site || null)
-        setProject(res.data.project || null)
-        setRows(res.data.assessments || [])
-      })
-      .catch(() => { if (active) setError('Could not load this site.') })
-      .finally(() => { if (active) setLoading(false) })
-    return () => { active = false }
-  }, [siteId])
+  useEffect(() => {
+    api.get('/projects/').then(r => setProjects(r.data.projects || [])).catch(() => {})
+  }, [])
 
-  useEffect(() => load(), [load])
+  const load = () => {
+    if (!projectId) return
+    setLoading(true); setErr('')
+    api.get(`/solar/projects/${projectId}/sites/`)
+      .then(r => setData(r.data)).catch(() => setErr('Could not load sites.'))
+      .finally(() => setLoading(false))
+  }
+  useEffect(() => { if (projectId) load(); else setData(null) }, [projectId])
 
-  const openEditor = (item) => {
-    setEditing(item.id)
-    setDraft({
-      fileName: item.file_name || '',
-      signedBy: item.signed_by || '',
-      verifiedBy: item.verified_by || '',
-    })
+  const addSite = async (e) => {
+    e.preventDefault(); setErr('')
+    try {
+      await api.post(`/solar/projects/${projectId}/sites/`, form)
+      setShowNew(false); setForm({ site_name: '', location: '', capacity_mw: '', apply_checklists: true })
+      load()
+    } catch (e2) { setErr(e2.response?.data?.error || 'Could not add site.') }
+  }
+  const siteAction = async (site, body) => {
+    setErr('')
+    try { await api.post(`/solar/sites/${site.id}/`, body); load() }
+    catch (e2) { setErr(e2.response?.data?.error || 'Action failed.') }
+  }
+  const setAssess = async (item, status) => {
+    setErr('')
+    try { await api.post(`/solar/assessment-items/${item.id}/`, { status }); load() }
+    catch (e2) { setErr(e2.response?.data?.error || 'Could not update.') }
+  }
+  const setNoc = async (noc, status) => {
+    setErr('')
+    try { await api.post(`/solar/approvals/${noc.id}/`, { status }); load() }
+    catch (e2) { setErr(e2.response?.data?.error || 'Could not update.') }
   }
 
-  const submitRow = (item, status) => {
-    setSaving(item.id)
-    setError('')
-    api.post(`/site-assessments/${item.id}/update/`, {
-      fileName: draft.fileName,
-      signedBy: draft.signedBy,
-      verifiedBy: draft.verifiedBy,
-      signedOn: draft.signedBy ? today() : '',
-      verifiedOn: draft.verifiedBy ? today() : '',
-      status,
-    })
-      .then(res => {
-        setRows(prev => prev.map(r => (r.id === item.id ? res.data.assessment : r)))
-        setSite(res.data.site)
-        setEditing(null)
-      })
-      .catch(err => {
-        const msg = err.response?.data?.error
-        setError(Array.isArray(msg) ? msg.join(', ') : (msg || 'Could not save that document.'))
-      })
-      .finally(() => setSaving(null))
-  }
-
-  const mandatoryTotal = site?.mandatory_total || 0
-  const mandatoryDone = site?.mandatory_cleared || 0
-  const outstanding = mandatoryTotal - mandatoryDone
-  const cleared = site?.status === 'cleared'
+  const sites = data?.sites || []
+  const cleared = sites.filter(s => s.is_cleared).length
+  const locked = data?.readiness?.locked
 
   return (
     <div className="space-y-6 pb-4">
-      <div className="page-header">
-        <div className="flex items-center gap-3">
-          <Link to={`/projects/${projectId}/sites`} className="btn-secondary !px-2"><ChevronLeft size={16} /></Link>
-          <div>
-            <h2 className="page-title">{site ? `${site.site_code} · ${site.site_name}` : 'Site assessment'}</h2>
-            <p className="page-subtitle">
-              {project?.project_name}{project?.project_code ? ` · ${project.project_code}` : ''}
-            </p>
-          </div>
-        </div>
+      <div>
+        <h2 className="page-title">Site Assessment &amp; Compliance</h2>
+        <p className="page-subtitle">Per-location records — capacity, assessment checklist and statutory NOCs. Project MW rolls up from sites.</p>
       </div>
 
-      {loading && (
-        <div className="flex items-center gap-2 text-sm text-slate-500 py-16 justify-center">
-          <Loader2 size={16} className="animate-spin" />Loading assessment…
-        </div>
-      )}
-      {!loading && error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl px-4 py-3">{error}</div>
-      )}
+      <div className="card p-4 flex items-center gap-3">
+        <FolderKanban size={16} className="text-slate-400" />
+        <select value={projectId} onChange={e => setProjectId(e.target.value)} className="form-input max-w-sm">
+          <option value="">Select a project…</option>
+          {projects.map(p => <option key={p.id} value={p.id}>{p.project_code ? `${p.project_code} — ` : ''}{p.project_name}</option>)}
+        </select>
+        {loading && <Loader2 size={16} className="animate-spin text-brand-500" />}
+      </div>
 
-      {!loading && site && (
+      {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-3 py-2">{err}</div>}
+
+      {projectId && !loading && data && (
         <>
-          {/* Site header */}
-          <div className="card p-6 flex flex-col xl:flex-row gap-6">
-            <div className="flex-1">
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <h3 className="text-lg font-bold text-slate-900">{site.site_name}</h3>
-                <span className="badge badge-blue">{site.site_code}</span>
-                <span className={`badge ${cleared ? 'badge-green' : site.status === 'in_review' ? 'badge-amber' : 'badge-slate'}`}>
-                  {cleared ? 'Cleared' : site.status === 'in_review' ? 'In review' : 'Not started'}
-                </span>
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-5 mt-5">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Capacity</p>
-                  <p className="font-semibold mt-1 tabular-nums">{fmtMw(site.capacity_mw)}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Land area</p>
-                  <p className="font-semibold mt-1 tabular-nums">
-                    {site.land_area_acres ? `${site.land_area_acres} acres` : '—'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Land title</p>
-                  <p className="font-semibold mt-1">{site.land_title_display || '—'}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Khasra no.</p>
-                  <p className="font-semibold mt-1 tabular-nums">{site.khasra_numbers || '—'}</p>
-                </div>
-              </div>
-            </div>
-            <div className="xl:w-60 bg-surface-50 border border-surface-200 rounded-xl p-4 flex-shrink-0">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Assessment progress</p>
-              <div className="flex items-baseline gap-1.5 mt-2">
-                <span className={`text-3xl font-bold leading-none ${cleared ? 'text-green-600' : 'text-amber-600'}`}>
-                  {mandatoryDone}
-                </span>
-                <span className="text-sm text-slate-500">of {mandatoryTotal} mandatory</span>
-              </div>
-              <div className="h-1.5 bg-surface-200 rounded-full mt-3 overflow-hidden">
-                <div
-                  className={`h-full rounded-full ${cleared ? 'bg-green-500' : 'bg-amber-500'}`}
-                  style={{ width: `${mandatoryTotal ? (mandatoryDone / mandatoryTotal) * 100 : 0}%` }}
-                />
-              </div>
-              <p className="text-xs text-slate-500 mt-2.5 leading-relaxed">
-                {cleared
-                  ? 'This site is released for execution.'
-                  : 'Site stays locked for execution until all mandatory documents clear.'}
-              </p>
-            </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Stat icon={MapPin} label="Sites / locations" value={sites.length} />
+            <Stat icon={CheckCircle2} label="Cleared" value={cleared} tone="text-green-600" />
+            <Stat icon={Zap} label="Total capacity" value={`${data.project_total_mw} MW`} />
+            <Stat icon={locked ? Lock : ShieldCheck} label="Development" value={locked ? 'Locked' : 'Ready'} tone={locked ? 'text-amber-600' : 'text-green-600'} />
           </div>
 
-          {/* Document checklist */}
           <div className="card overflow-hidden">
-            <div className="px-5 py-4 border-b border-surface-200 flex items-center gap-3">
-              <h3 className="font-semibold text-slate-900">Pre-execution assessment</h3>
-              {outstanding > 0 && <span className="badge badge-red">{outstanding} outstanding</span>}
+            <div className="px-5 py-4 border-b border-surface-100 flex items-center justify-between">
+              <h3 className="font-semibold text-slate-900 text-sm flex items-center gap-2"><MapPin size={15} />Locations</h3>
+              <button onClick={() => setShowNew(v => !v)} className="btn-primary text-xs py-1.5"><Plus size={13} />Add site</button>
             </div>
-            <div className="overflow-x-auto">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Document</th>
-                    <th>File</th>
-                    <th>Signed by</th>
-                    <th>Verified</th>
-                    <th>Status</th>
-                    <th className="!text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map(item => {
-                    const meta = STATUS_META[item.status] || STATUS_META.pending
-                    const isEditing = editing === item.id
-                    return (
-                      <React.Fragment key={item.id}>
-                        <tr className={rowTone(item)}>
-                          <td>
-                            <div className="flex items-center gap-2">
-                              <span className="font-semibold text-slate-900">{item.label}</span>
-                              {!item.is_mandatory && (
-                                <span className="text-[10px] font-semibold text-slate-500 bg-surface-100 px-1.5 py-0.5 rounded">OPTIONAL</span>
-                              )}
+
+            {showNew && (
+              <form onSubmit={addSite} className="p-4 bg-surface-50 border-b border-surface-100 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div><label className="form-label">Site name</label>
+                  <input className="form-input" required value={form.site_name} onChange={e => setForm(f => ({ ...f, site_name: e.target.value }))} placeholder="e.g. Pokaran Block-A" /></div>
+                <div><label className="form-label">Location</label>
+                  <input className="form-input" value={form.location} onChange={e => setForm(f => ({ ...f, location: e.target.value }))} placeholder="District / state" /></div>
+                <div><label className="form-label">Capacity (MW)</label>
+                  <input type="number" step="0.001" className="form-input" value={form.capacity_mw} onChange={e => setForm(f => ({ ...f, capacity_mw: e.target.value }))} /></div>
+                <label className="flex items-center gap-2 text-sm text-slate-700 mt-6">
+                  <input type="checkbox" checked={form.apply_checklists} onChange={e => setForm(f => ({ ...f, apply_checklists: e.target.checked }))} className="w-4 h-4 accent-brand-500" />
+                  Apply standard assessment + NOC checklists
+                </label>
+                <div className="md:col-span-2 flex justify-end gap-2">
+                  <button type="button" onClick={() => setShowNew(false)} className="btn-secondary text-xs">Cancel</button>
+                  <button type="submit" className="btn-primary text-xs"><Plus size={13} />Add site</button>
+                </div>
+              </form>
+            )}
+
+            <table className="data-table">
+              <thead><tr><th></th><th>Code</th><th>Site / location</th><th className="text-right">MW</th><th className="text-center">Assessment</th><th className="text-center">NOCs</th><th>Status</th></tr></thead>
+              <tbody>
+                {sites.length === 0 && <tr><td colSpan={7} className="text-center text-slate-400 py-6">No sites yet. Add the project's locations above.</td></tr>}
+                {sites.map(s => (
+                  <React.Fragment key={s.id}>
+                    <tr className="cursor-pointer hover:bg-surface-50" onClick={() => setOpen(open === s.id ? null : s.id)}>
+                      <td>{open === s.id ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}</td>
+                      <td className="font-mono text-xs font-semibold text-slate-700">{s.site_code}</td>
+                      <td className="text-slate-700">{s.site_name}{s.location ? <span className="text-xs text-slate-400"> · {s.location}</span> : null}</td>
+                      <td className="text-right">{s.capacity_mw}</td>
+                      <td className="text-center text-xs">{s.assessment_pending ? <span className="text-amber-600">{s.assessment_pending} pending</span> : <span className="text-green-600">OK</span>}</td>
+                      <td className="text-center text-xs">{s.noc_pending ? <span className="text-amber-600">{s.noc_pending} pending</span> : <span className="text-green-600">OK</span>}</td>
+                      <td><span className={`badge ${siteBadge[s.status] || 'badge-slate'}`}>{s.status_display}</span></td>
+                    </tr>
+                    {open === s.id && (
+                      <tr><td colSpan={7} className="bg-surface-50/60 p-0">
+                        <div className="px-6 py-4 grid grid-cols-1 lg:grid-cols-2 gap-6">
+                          {/* assessments */}
+                          <div>
+                            <div className="flex items-center justify-between mb-2">
+                              <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 flex items-center gap-1"><ClipboardCheck size={13} />Assessment</h4>
+                              <button onClick={() => siteAction(s, { action: 'apply_checklists' })} className="text-xs text-brand-600 hover:text-brand-700 font-medium">Apply checklists</button>
                             </div>
-                            <p className="text-xs text-slate-500 mt-0.5">
-                              {item.hint}{item.is_mandatory ? ' · mandatory' : ''}
-                            </p>
-                          </td>
-                          <td>
-                            {item.file_name
-                              ? <span className="flex items-center gap-1.5 text-brand-600 font-medium"><FileText size={13} />{item.file_name}</span>
-                              : <span className="text-slate-400">Not uploaded</span>}
-                          </td>
-                          <td>{item.signed_by || <span className="text-slate-400">—</span>}</td>
-                          <td>{item.verified_by || <span className="text-slate-400">—</span>}</td>
-                          <td><span className={`badge ${meta.badge}`}>{meta.label}</span></td>
-                          <td className="!text-right">
-                            <button
-                              type="button"
-                              onClick={() => (isEditing ? setEditing(null) : openEditor(item))}
-                              className="text-xs font-semibold text-brand-600 hover:text-brand-700"
-                            >
-                              {isEditing ? 'Close' : 'Record'}
-                            </button>
-                          </td>
-                        </tr>
-                        {isEditing && (
-                          <tr className="bg-surface-50">
-                            <td colSpan={6} className="!py-4">
-                              <div className="flex flex-wrap items-end gap-3">
-                                <div className="flex-1 min-w-[180px]">
-                                  <label className="form-label" htmlFor={`f-${item.id}`}>Document file name</label>
-                                  <input
-                                    id={`f-${item.id}`} type="text" className="form-input"
-                                    placeholder="e.g. SCR-002.pdf" value={draft.fileName}
-                                    onChange={e => setDraft(d => ({ ...d, fileName: e.target.value }))}
-                                  />
-                                </div>
-                                <div className="flex-1 min-w-[180px]">
-                                  <label className="form-label" htmlFor={`s-${item.id}`}>Signed by</label>
-                                  <input
-                                    id={`s-${item.id}`} type="text" className="form-input"
-                                    placeholder="Client / owner / authority" value={draft.signedBy}
-                                    onChange={e => setDraft(d => ({ ...d, signedBy: e.target.value }))}
-                                  />
-                                </div>
-                                <div className="flex-1 min-w-[180px]">
-                                  <label className="form-label" htmlFor={`v-${item.id}`}>Verified by</label>
-                                  <input
-                                    id={`v-${item.id}`} type="text" className="form-input"
-                                    placeholder="Our engineer" value={draft.verifiedBy}
-                                    onChange={e => setDraft(d => ({ ...d, verifiedBy: e.target.value }))}
-                                  />
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <button
-                                    type="button" disabled={saving === item.id}
-                                    onClick={() => submitRow(item, 'uploaded')}
-                                    className="btn-secondary"
-                                  >
-                                    <Upload size={13} />Save
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={saving === item.id || !draft.signedBy || !draft.verifiedBy}
-                                    onClick={() => submitRow(item, 'cleared')}
-                                    className="btn-primary disabled:opacity-40 disabled:cursor-not-allowed"
-                                  >
-                                    {saving === item.id ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
-                                    Clear
-                                  </button>
-                                </div>
+                            {s.assessments.length === 0 && <p className="text-xs text-slate-400">No assessment items.</p>}
+                            {s.assessments.map(a => (
+                              <div key={a.id} className="flex items-center gap-2 py-1 text-sm">
+                                <span className="flex-1 truncate text-slate-600">{a.name}</span>
+                                <select value={a.status} onChange={e => setAssess(a, e.target.value)}
+                                  className={`text-xs border rounded-md px-2 py-1 ${a.is_satisfied ? 'border-green-200 bg-green-50 text-green-700' : 'border-surface-200'}`}>
+                                  {ASSESS_STATUS.map(x => <option key={x} value={x}>{x}</option>)}
+                                </select>
                               </div>
-                              <p className="text-xs text-slate-500 mt-2">
-                                A document can only be cleared once both a signatory and a verifier are on record.
-                              </p>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <div className={`px-5 py-4 border-t border-surface-200 flex items-center gap-3 ${
-              cleared ? 'bg-green-50' : 'bg-amber-50'
-            }`}>
-              {cleared
-                ? <CheckCircle2 size={16} className="text-green-600 flex-shrink-0" />
-                : <AlertTriangle size={16} className="text-amber-600 flex-shrink-0" />}
-              <span className={`text-sm ${cleared ? 'text-green-900' : 'text-amber-900'}`}>
-                {cleared
-                  ? 'All mandatory documents cleared — this site is released for execution.'
-                  : `${outstanding} mandatory document${outstanding === 1 ? '' : 's'} outstanding — this site cannot be released for execution.`}
-              </span>
-            </div>
+                            ))}
+                          </div>
+                          {/* NOCs */}
+                          <div>
+                            <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 flex items-center gap-1 mb-2"><ShieldCheck size={13} />Statutory NOCs</h4>
+                            {s.nocs.length === 0 && <p className="text-xs text-slate-400">No NOCs. Use “Apply checklists”.</p>}
+                            {s.nocs.map(n => (
+                              <div key={n.id} className="flex items-center gap-2 py-1 text-sm">
+                                <span className="flex-1 truncate text-slate-600">{n.authority} · {n.approval_type}</span>
+                                <select value={n.status} onChange={e => setNoc(n, e.target.value)}
+                                  className={`text-xs border rounded-md px-2 py-1 ${n.is_satisfied ? 'border-green-200 bg-green-50 text-green-700' : 'border-surface-200'}`}>
+                                  {NOC_STATUS.map(x => <option key={x} value={x}>{x}</option>)}
+                                </select>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="lg:col-span-2 flex items-center gap-2 pt-1">
+                            <span className="text-xs text-slate-400">Set location status:</span>
+                            {['cleared', 'on_hold', 'pending'].map(st => (
+                              <button key={st} onClick={() => siteAction(s, { action: 'set_status', status: st })}
+                                className="text-xs btn-secondary !py-1">{st.replace('_', ' ')}</button>
+                            ))}
+                            <button onClick={() => { if (window.confirm(`Remove site ${s.site_code}?`)) siteAction(s, { action: 'delete' }) }}
+                              className="text-xs text-red-500 hover:text-red-600 ml-auto">Remove</button>
+                          </div>
+                        </div>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
           </div>
+
+          {locked && (
+            <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3">
+              <p className="font-semibold mb-1 flex items-center gap-2"><Lock size={14} />Development is locked</p>
+              <ul className="list-disc list-inside text-xs space-y-0.5">
+                {(data.readiness.reasons || []).map((r, i) => <li key={i}>{r}</li>)}
+              </ul>
+            </div>
+          )}
         </>
       )}
     </div>

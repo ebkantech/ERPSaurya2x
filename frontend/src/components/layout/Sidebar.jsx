@@ -6,52 +6,84 @@ import {
   LayoutDashboard, Building2, ShoppingCart, Truck, CreditCard,
   FolderKanban, Package, BarChart3, Settings, LogOut, Zap,
   ChevronRight, ArrowLeftRight, Bell, ClipboardList, Sparkles, PackageSearch,
-  Users as UsersIcon, HardHat, ShieldCheck, Wallet, FileText,
+  Users as UsersIcon, HardHat, ShieldCheck, Wallet, FileText, FileSignature,
+  IndianRupee, Inbox, Archive, FileCheck,MapPin,
 } from 'lucide-react'
 
 const navGroups = [
   {
     label: 'Overview',
     items: [
-      { label: 'Dashboard',        icon: LayoutDashboard, path: '/' },
+      { label: 'Dashboard', icon: LayoutDashboard, path: '/' },
     ],
   },
   {
-    label: 'Procurement',
+    label: '1 · Projects & WBS',
     items: [
-      { label: 'Vendors',          icon: Building2,   path: '/vendors' },
-      { label: 'Purchase Orders',  icon: ShoppingCart, path: '/purchase-orders' },
-      { label: 'Deliveries',       icon: Truck,        path: '/deliveries' },
-      { label: 'Payments',         icon: CreditCard,   path: '/payments' },
+      { label: 'Projects', icon: FolderKanban, path: '/projects' },
+      { label: 'Site Assessment', icon: MapPin, path: '/projects/site-assessment' },
+    ],
+  },
+  {
+    label: '2 · Engineering & DMS',
+    items: [
       { label: 'Documents (DMS)', icon: FileText, path: '/operations/documents' },
     ],
   },
   {
-    label: 'Operations',
+    label: '3 · Subcontractor & Vendor',
     items: [
-      { label: 'Projects',         icon: FolderKanban, path: '/projects' },
-      { label: 'Daily Work Progress', icon: ClipboardList, path: '/operations/daily-progress' },
-      { label: 'Budget vs Actual', icon: Wallet, path: '/operations/budget' },
-      { label: 'Materials',        icon: Package,      path: '/materials' },
+      { label: 'Vendors', icon: Building2, path: '/vendors' },
+      { label: 'Work Orders', icon: FileSignature, path: '/operations/work-orders' },
+      { label: 'Vendor Authorization', icon: UsersIcon, path: '/vendor-control' },
+    ],
+  },
+  {
+    label: '4 · Procurement & Inventory',
+    items: [
+      { label: 'Purchase Orders', icon: ShoppingCart, path: '/purchase-orders' },
+      { label: 'Deliveries', icon: Truck, path: '/deliveries' },
+      { label: 'Materials', icon: Package, path: '/materials' },
       { label: 'Quotations', icon: PackageSearch, path: '/materials/quotations' },
-      { label: 'Transport',        icon: ArrowLeftRight, path: '/transport' },
-      { label: 'Tasks',            icon: ClipboardList, path: '/tasks' },
-      { label: 'Quality & Punch List', icon: ShieldCheck, path: '/operations/quality' }
+      { label: 'Transport', icon: ArrowLeftRight, path: '/transport' },
+      { label: 'Goods Receipt (GRN)', icon: Inbox, soon: true },
+    ],
+  },
+  {
+    label: '5 · Field Ops & QA/QC',
+    items: [
+      { label: 'Daily Work Progress', icon: HardHat, path: '/operations/daily-progress' },
+      { label: 'Quality & Punch List', icon: ShieldCheck, path: '/operations/quality' },
+      { label: 'Tasks', icon: ClipboardList, path: '/tasks' },
+    ],
+  },
+  {
+    label: '6 · Financial & Profitability',
+    items: [
+      { label: 'Budget vs Actual', icon: Wallet, path: '/operations/budget' },
+      { label: 'Payments', icon: CreditCard, path: '/payments' },
+      { label: 'Margin (₹/Wp)', icon: IndianRupee, soon: true },
+    ],
+  },
+  {
+    label: '7 · O&M Handover',
+    items: [
+      { label: 'Handover (in Work Structure)', icon: FileCheck, path: '/projects' },
+      { label: 'As-built Dossier', icon: Archive, soon: true },
     ],
   },
   {
     label: 'Analytics',
     items: [
-      { label: 'Reports',          icon: BarChart3,    path: '/reports'        },
-      { label: 'Notifications',    icon: Bell,         path: '/notifications'  },
-      { label: 'AI Assistant',     icon: Sparkles,     path: '/assistant'      },
+      { label: 'Reports', icon: BarChart3, path: '/reports' },
+      { label: 'Notifications', icon: Bell, path: '/notifications' },
+      { label: 'AI Assistant', icon: Sparkles, path: '/assistant' },
     ],
   },
   {
     label: 'System',
     items: [
-      { label: 'Administration',      icon: Settings,   path: '/administration' },
-      { label: 'Vendor Authorization', icon: UsersIcon, path: '/vendor-control' },
+      { label: 'Administration', icon: Settings, path: '/administration' },
     ],
   },
 ]
@@ -60,11 +92,13 @@ export default function Sidebar() {
   const { user, logout } = useAuth()
   const location = useLocation()
 
-  const allPaths = navGroups.flatMap((group) => group.items.map((item) => item.path))
+  const allPaths = navGroups
+    .flatMap((group) => group.items.map((item) => item.path))
+    .filter(Boolean)
   const bestMatch = allPaths
     .filter((path) => (path === '/' ? location.pathname === '/' : location.pathname.startsWith(path)))
     .sort((a, b) => b.length - a.length)[0]
-  const isActive = (path) => path === bestMatch
+  const isActive = (path) => path && path === bestMatch
 
   return (
     <div className="fixed inset-y-0 left-0 w-64 bg-brand-900 flex flex-col z-30 shadow-sidebar">
@@ -86,6 +120,21 @@ export default function Sidebar() {
             <p className="sidebar-group-label">{group.label}</p>
             {group.items.map((item) => {
               const Icon = item.icon
+
+              if (item.soon) {
+                return (
+                  <div
+                    key={item.label}
+                    title="Planned — coming soon"
+                    className="sidebar-link opacity-40 cursor-not-allowed select-none"
+                  >
+                    <Icon size={17} className="flex-shrink-0" />
+                    <span>{item.label}</span>
+                    <span className="ml-auto text-[10px] uppercase tracking-wide bg-white/10 text-white/70 px-1.5 py-0.5 rounded">soon</span>
+                  </div>
+                )
+              }
+
               const active = isActive(item.path)
               return (
                 <Link
@@ -127,7 +176,3 @@ export default function Sidebar() {
     </div>
   )
 }
-
-
-
-

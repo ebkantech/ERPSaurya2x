@@ -785,3 +785,18 @@ def field_vendor_billing_view(request):
         'summary': summary[0] if summary else None,
         'milestones': ms_rows,
     })
+
+
+def _site_readiness(project):
+    """Per-site development-gate status for the project's build button."""
+    blockers = services.site_assessment_blockers(project)
+    return {'ready': not blockers, 'blockers': blockers}
+
+
+def site_readiness_view(request, project_id):
+    """GET → whether the project's sites are cleared to start development."""
+    redirect = _auth(request)
+    if redirect:
+        return redirect
+    project = get_object_or_404(ProjectMaster, pk=project_id)
+    return JsonResponse(_site_readiness(project))

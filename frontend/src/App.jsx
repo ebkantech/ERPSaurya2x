@@ -22,6 +22,7 @@ import ProjectCreate from './pages/projects/ProjectCreate'
 import ProjectWorkStructure from './pages/projects/ProjectWorkStructure'
 import QualityControl from './pages/operations/QualityControl' 
 import BudgetVsActual from './pages/operations/BudgetVsActual'
+import WorkOrders from './pages/operations/WorkOrders'
 import MaterialList  from './pages/materials/MaterialList'
 import QuotationList   from './pages/materials/QuotationList'
 import QuotationBuilder from './pages/materials/QuotationBuilder'
@@ -81,17 +82,20 @@ export default function App() {
             <Route path="purchase-orders/:id"    element={<PODetail />}      />
             <Route path="deliveries"             element={<DeliveryList />}  />
             <Route path="payments"               element={<PaymentList />}   />
-            <Route path="operations/documents" element={<DocumentControl />} />
+            
             {/* Operations */}
             <Route path="projects"               element={<ProjectList />}   />
             <Route path="projects/new"           element={<ProjectCreate />} />
             <Route path="projects/:projectId/sites"          element={<ProjectSites />}   />
             <Route path="projects/:projectId/sites/new"      element={<SiteCreate />}     />
             <Route path="projects/:projectId/sites/:siteId"  element={<SiteAssessment />} />
+            <Route path="projects/site-assessment" element={<SiteAssessment />} />
             <Route path="work-structure/:projectId" element={<ProjectWorkStructure />} />
             <Route path="operations/daily-progress" element={<DailyWorkProgress />} />
             <Route path="operations/quality" element={<QualityControl />} />
             <Route path="operations/budget" element={<BudgetVsActual />} />
+            <Route path="operations/documents" element={<DocumentControl />} />
+            <Route path="operations/work-orders" element={<WorkOrders />} />
             <Route path="materials"              element={<MaterialList />}  />
             <Route path="materials/quotations"     element={<QuotationList />}    />
             <Route path="materials/quotations/new" element={<QuotationBuilder />} />

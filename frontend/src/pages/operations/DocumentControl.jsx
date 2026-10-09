@@ -23,7 +23,7 @@ const revBadge = {
 }
 const apprBadge = {
   pending: 'badge-slate', submitted: 'badge-amber', approved: 'badge-green',
-  rejected: 'badge-red', resubmit: 'badge-amber',
+  rejected: 'badge-red', resubmit: 'badge-amber', waived: 'badge-slate',
 }
 
 function Stat({ icon: Icon, label, value, tone = 'text-slate-900' }) {
@@ -85,6 +85,17 @@ export default function DocumentControl() {
     try { await api.post(`/solar/revisions/${rev.id}/`, { status }); load() }
     catch (e2) { setErr(e2.response?.data?.error || 'Could not update revision.') }
   }
+  const applyChecklist = async () => {
+    setErr('')
+    try { await api.post(`/solar/projects/${projectId}/approvals/`, { action: 'apply_checklist' }); load() }
+    catch (e2) { setErr(e2.response?.data?.error || 'Could not apply checklist.') }
+  }
+  const updateAppr = async (a, patch) => {
+    setErr('')
+    try { await api.post(`/solar/approvals/${a.id}/`, patch); load() }
+    catch (e2) { setErr(e2.response?.data?.error || 'Could not update approval.') }
+  }
+
   const createAppr = async (e) => {
     e.preventDefault(); setErr('')
     try {
@@ -207,8 +218,11 @@ export default function DocumentControl() {
           {/* Statutory / DISCOM approvals */}
           <div className="card overflow-hidden">
             <div className="px-5 py-4 border-b border-surface-100 flex items-center justify-between">
-              <h3 className="font-semibold text-slate-900 text-sm flex items-center gap-2"><ShieldCheck size={15} />Statutory / DISCOM Approvals</h3>
-              <button onClick={() => setShowNewAppr(v => !v)} className="btn-secondary text-xs py-1.5"><Plus size={13} />Record approval</button>
+              <h3 className="font-semibold text-slate-900 text-sm flex items-center gap-2"><ShieldCheck size={15} />Statutory / DISCOM Approvals &amp; NOCs</h3>
+              <div className="flex items-center gap-2">
+                <button onClick={applyChecklist} className="btn-secondary text-xs py-1.5" title="Add the standard mandatory solar NOC checklist">Apply NOC checklist</button>
+                <button onClick={() => setShowNewAppr(v => !v)} className="btn-secondary text-xs py-1.5"><Plus size={13} />Record approval</button>
+              </div>
             </div>
             {showNewAppr && (
               <form onSubmit={createAppr} className="p-4 bg-surface-50 border-b border-surface-100 grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -228,16 +242,31 @@ export default function DocumentControl() {
               </form>
             )}
             <table className="data-table">
-              <thead><tr><th>Authority</th><th>Approval</th><th>Reference</th><th>Submitted</th><th>Status</th></tr></thead>
+              <thead><tr><th>Authority</th><th>Approval / NOC</th><th className="text-center">Gating</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {approvals.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No approvals recorded.</td></tr>}
+                {approvals.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No approvals recorded. Click “Apply NOC checklist” to add the standard set.</td></tr>}
                 {approvals.map(a => (
                   <tr key={a.id}>
                     <td className="font-semibold text-slate-700">{a.authority}</td>
-                    <td className="text-slate-600">{a.approval_type}</td>
-                    <td className="font-mono text-xs text-slate-400">{a.reference_no || '—'}</td>
-                    <td className="text-xs text-slate-400">{a.submitted_date || '—'}</td>
-                    <td><span className={`badge ${apprBadge[a.status] || 'badge-slate'}`}>{a.status_display}</span></td>
+                    <td className="text-slate-600">{a.approval_type}{a.reference_no ? <span className="text-xs text-slate-400 font-mono"> · {a.reference_no}</span> : null}</td>
+                    <td className="text-center">
+                      <button onClick={() => updateAppr(a, { is_mandatory: !a.is_mandatory })}
+                        title="Toggle whether this NOC blocks development"
+                        className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${a.is_mandatory ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-slate-50 text-slate-400 border-slate-200'}`}>
+                        {a.is_mandatory ? 'Mandatory' : 'Optional'}
+                      </button>
+                    </td>
+                    <td>
+                      <select value={a.status} onChange={e => updateAppr(a, { status: e.target.value })}
+                        className={`text-xs border rounded-md px-2 py-1 outline-none ${a.is_satisfied ? 'border-green-200 bg-green-50 text-green-700' : 'border-surface-200'}`}>
+                        {['pending','submitted','approved','rejected','resubmit','waived'].map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </td>
+                    <td className="text-right">
+                      {!a.is_satisfied && (
+                        <button onClick={() => updateAppr(a, { status: 'approved' })} className="text-xs text-green-600 hover:text-green-700 font-semibold">Approve</button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

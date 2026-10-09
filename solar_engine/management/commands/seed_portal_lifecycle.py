@@ -332,6 +332,12 @@ class Command(BaseCommand):
         # ----- 15. engineering DMS (documents + revisions + approvals) --
         self._seed_dms(project, build, w)
 
+        # ----- 16. subcontractor work order (labour-only) ---------------
+        self._seed_work_order(project, build, vendor, scope, w)
+
+        # ----- 17. sites / locations (per-location compliance) ----------
+        self._seed_sites(project, w)
+
         w(self.style.SUCCESS(
             f'\nDone. Log into FieldTracker2x with vendor code "{VENDOR_CODE}". '
             f'ERP project: {PROJECT_CODE} (build #{build.id}).'))
@@ -449,6 +455,52 @@ class Command(BaseCommand):
                     approval_type='Energisation / charging permission',
                     status=SA.STATUS_PENDING, remark='To be filed after erection completion.')
         w(f'DMS seeded ({ED.objects.filter(project=project).count()} documents + DISCOM/CEIG approvals).')
+
+    def _seed_work_order(self, project, build, vendor, scope, w):
+        """Issue a labour-only subcontractor work order over the vendor's scope."""
+        from solar_engine import work_orders as _wo
+        from solar_engine.models import SubcontractWorkOrder
+        if SubcontractWorkOrder.objects.filter(project=project, vendor=vendor).exists():
+            return
+        lines = [{'work_package_id': wp.id, 'line_value': str(400000 + i * 50000)}
+                 for i, wp in enumerate(scope)]
+        wo = _wo.create_work_order(
+            project, vendor, 'Civil, MMS & electrical installation (labour)',
+            lines=lines, engagement_type='milestone',
+            rate_basis=SubcontractWorkOrder.RATE_PER_WATT, rate_per_wp='4.25',
+            contract_value=str(sum(400000 + i * 50000 for i in range(len(scope)))),
+            retention_percent='5',
+            scope_note='Labour, machinery and installation for the vendor scope; '
+                       'material free-issued by the company where applicable.')
+        # Issue without propagating so the mixed milestone/free-issue demo on the
+        # work packages (set earlier) is preserved.
+        _wo.issue_work_order(wo, propagate=False)
+        w(f'Work order {wo.wo_no} issued over {len(lines)} work packages.')
+
+    def _seed_sites(self, project, w):
+        """Seed two locations with per-site assessment + NOC checklists: one
+        fully cleared, one still pending — so the project shows a mixed,
+        per-location compliance picture. Project MW rolls up from the sites."""
+        from solar_engine import services as _svc
+        from solar_engine.models import ProjectSite, SiteAssessmentItem, StatutoryApproval
+        if ProjectSite.objects.filter(project=project).exists():
+            return
+        specs = [
+            ('Pokaran Block-A', 'Pokaran, Rajasthan', '3.000', True),
+            ('Pokaran Block-B', 'Pokaran, Rajasthan', '2.000', False),
+        ]
+        for i, (name, loc, mw, clear) in enumerate(specs, 1):
+            site = ProjectSite.objects.create(
+                project=project, site_code=f'{project.project_code}-S{i:02d}',
+                site_name=name, location=loc, capacity_mw=Decimal(mw))
+            _svc.apply_default_site_assessments(site)
+            _svc.apply_default_noc_checklist(project, site=site)
+            if clear:
+                SiteAssessmentItem.objects.filter(site=site).update(status=SiteAssessmentItem.STATUS_CLEARED)
+                StatutoryApproval.objects.filter(site=site).update(status=StatutoryApproval.STATUS_APPROVED)
+                _svc.maybe_autoclear_site(site)
+        _svc.recalc_project_mw(project)
+        w('2 sites seeded (Block-A cleared, Block-B pending) with per-location assessment + NOCs.')
 
     def _seed_cleared_site(self, project, w):
         """Create a cleared ProjectSite (+ cleared mandatory assessments) so the

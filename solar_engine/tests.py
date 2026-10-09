@@ -632,3 +632,203 @@ class DmsTests(TestCase):
     def test_documents_endpoint_requires_login(self):
         resp = self.client.get(reverse('solar-documents', args=[self.project.id]))
         self.assertIn(resp.status_code, (302, 401, 403))
+
+
+class SubcontractWorkOrderTests(TestCase):
+    """Labour-only subcontractor work orders: create, link WPs, issue→propagate."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+        from core.models import Vendor
+        cls.vendor = Vendor.objects.create(
+            vendor_id='VWO001', company_name='WO Labour Co',
+            vendor_type='partner', vendor_category='sub-contractor', status='active')
+        from .models import ProjectWorkPackage
+        cls.project = ProjectMaster.objects.create(project_name='WO Proj', total_mw=Decimal('5'))
+        cls.build = services.instantiate_build(cls.project, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        cls.wps = list(ProjectWorkPackage.objects.filter(stage__build=cls.build)[:2])
+
+    def _wo(self, **kw):
+        from . import work_orders as wo
+        return wo.create_work_order(
+            self.project, self.vendor, kw.get('title', 'Civil & MMS labour'),
+            lines=[{'work_package_id': self.wps[0].id, 'line_value': '500000'},
+                   {'work_package_id': self.wps[1].id, 'line_value': '300000'}],
+            engagement_type=kw.get('engagement_type', 'free_issue'),
+            rate_basis='per_wp_wattage', rate_per_wp='3.50', contract_value='800000',
+            retention_percent='5')
+
+    def test_create_generates_wo_no_and_links(self):
+        wo = self._wo()
+        self.assertTrue(wo.wo_no.startswith('WO-'))
+        self.assertEqual(wo.lines.count(), 2)
+        self.assertEqual(wo.lines_value, Decimal('800000'))
+        self.assertEqual(wo.status, wo.STATUS_DRAFT)
+
+    def test_issue_propagates_vendor_and_engagement(self):
+        from . import work_orders as wo_svc
+        wo = self._wo(engagement_type='free_issue')
+        wo_svc.issue_work_order(wo, propagate=True)
+        wo.refresh_from_db()
+        self.assertEqual(wo.status, wo.STATUS_ISSUED)
+        for wp in self.wps:
+            wp.refresh_from_db()
+            self.assertEqual(wp.assigned_vendor_id, self.vendor.id)
+            self.assertEqual(wp.engagement_type, 'free_issue')
+
+    def test_issue_without_lines_rejected(self):
+        from . import work_orders as wo_svc
+        wo = wo_svc.create_work_order(self.project, self.vendor, 'Empty WO')
+        with self.assertRaises(services.EngineError):
+            wo_svc.issue_work_order(wo)
+
+    def test_duplicate_work_package_line_rejected(self):
+        from . import work_orders as wo_svc
+        wo = self._wo()
+        with self.assertRaises(services.EngineError):
+            wo_svc.add_line(wo, self.wps[0].id, '100')
+
+    def test_work_package_from_other_project_rejected(self):
+        from . import work_orders as wo_svc
+        from .models import ProjectWorkPackage
+        other = ProjectMaster.objects.create(project_name='Other', total_mw=Decimal('5'))
+        ob = services.instantiate_build(other, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        owp = ProjectWorkPackage.objects.filter(stage__build=ob).first()
+        wo = wo_svc.create_work_order(self.project, self.vendor, 'X')
+        with self.assertRaises(services.EngineError):
+            wo_svc.add_line(wo, owp.id, '100')
+
+    def test_work_orders_endpoint_requires_login(self):
+        resp = self.client.get(reverse('solar-work-orders', args=[self.project.id]))
+        self.assertIn(resp.status_code, (302, 401, 403))
+
+
+class ProjectReadinessGateTests(TestCase):
+    """Combined development gate: site cleared + mandatory NOC checklist."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+
+    def _project(self, name):
+        return ProjectMaster.objects.create(project_name=name, total_mw=Decimal('5'))
+
+    def test_no_nocs_no_sites_is_unlocked(self):
+        # Sites feature absent in this clone → site part is empty; no NOCs → unlocked.
+        p = self._project('Clean')
+        r = services.project_readiness(p)
+        self.assertFalse(r['locked'])
+        # build should succeed
+        b = services.instantiate_build(p, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        self.assertIsNotNone(b)
+
+    def test_apply_checklist_locks_until_approved(self):
+        from .models import StatutoryApproval
+        p = self._project('Gated')
+        n = services.apply_default_noc_checklist(p)
+        self.assertEqual(n, len(services.DEFAULT_NOC_CHECKLIST))
+        r = services.project_readiness(p)
+        self.assertTrue(r['locked'])
+        self.assertEqual(len(r['nocs']), n)
+        # build must be blocked now
+        with self.assertRaises(services.EngineError):
+            services.instantiate_build(p, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        # approve/waive all mandatory NOCs
+        for a in StatutoryApproval.objects.filter(project=p, is_mandatory=True):
+            a.status = StatutoryApproval.STATUS_APPROVED
+            a.save()
+        r2 = services.project_readiness(p)
+        self.assertFalse(r2['locked'])
+        self.assertIsNotNone(services.instantiate_build(p, C.PROJECT_TYPE_ROOFTOP, Decimal('5')))
+
+    def test_waived_also_satisfies(self):
+        from .models import StatutoryApproval
+        p = self._project('Waive')
+        services.apply_default_noc_checklist(p)
+        StatutoryApproval.objects.filter(project=p).update(status=StatutoryApproval.STATUS_WAIVED)
+        self.assertFalse(services.project_readiness(p)['locked'])
+
+    def test_apply_checklist_idempotent(self):
+        p = self._project('Idem')
+        services.apply_default_noc_checklist(p)
+        again = services.apply_default_noc_checklist(p)
+        self.assertEqual(again, 0)
+
+    def test_readiness_endpoint_requires_login(self):
+        p = self._project('Auth')
+        resp = self.client.get(reverse('solar-readiness', args=[p.id]))
+        self.assertIn(resp.status_code, (302, 401, 403))
+
+
+class PerSiteComplianceTests(TestCase):
+    """Per-location sites: MW rollup + per-site assessment & NOC gate."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+
+    def _project(self):
+        return ProjectMaster.objects.create(project_name='Multi-site', project_code='MS1', total_mw=Decimal('0'))
+
+    def test_project_mw_rolls_up_from_sites(self):
+        from .models import ProjectSite
+        p = self._project()
+        ProjectSite.objects.create(project=p, site_code='MS1-S01', site_name='A', capacity_mw=Decimal('3'))
+        ProjectSite.objects.create(project=p, site_code='MS1-S02', site_name='B', capacity_mw=Decimal('2.5'))
+        services.recalc_project_mw(p)
+        p.refresh_from_db()
+        self.assertEqual(p.total_mw, Decimal('5.5'))
+
+    def test_no_site_is_not_blocked(self):
+        # A project with no locations yet is not gated on sites.
+        p = self._project()
+        self.assertFalse(services.project_readiness(p)['locked'])
+
+    def test_pending_site_blocks(self):
+        from .models import ProjectSite
+        p = self._project()
+        ProjectSite.objects.create(project=p, site_code='MS1-S09', site_name='Pending', capacity_mw=Decimal('2'))
+        self.assertTrue(services.project_readiness(p)['locked'])
+
+    def test_site_cleared_when_assessments_and_nocs_satisfied(self):
+        from .models import ProjectSite, SiteAssessmentItem, StatutoryApproval
+        p = self._project()
+        site = ProjectSite.objects.create(project=p, site_code='MS1-S01', site_name='A', capacity_mw=Decimal('5'))
+        services.apply_default_site_assessments(site)
+        services.apply_default_noc_checklist(p, site=site)
+        # locked while pending
+        self.assertTrue(services.project_readiness(p)['locked'])
+        with self.assertRaises(services.EngineError):
+            services.instantiate_build(p, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        # clear everything
+        SiteAssessmentItem.objects.filter(site=site).update(status=SiteAssessmentItem.STATUS_CLEARED)
+        StatutoryApproval.objects.filter(site=site).update(status=StatutoryApproval.STATUS_APPROVED)
+        services.maybe_autoclear_site(site)
+        site.refresh_from_db()
+        self.assertEqual(site.status, ProjectSite.STATUS_CLEARED)
+        self.assertFalse(services.project_readiness(p)['locked'])
+        self.assertIsNotNone(services.instantiate_build(p, C.PROJECT_TYPE_ROOFTOP, Decimal('5')))
+
+    def test_one_pending_site_keeps_project_locked(self):
+        from .models import ProjectSite, SiteAssessmentItem, StatutoryApproval
+        p = self._project()
+        s1 = ProjectSite.objects.create(project=p, site_code='MS1-S01', site_name='A', capacity_mw=Decimal('5'), status=ProjectSite.STATUS_CLEARED)
+        s2 = ProjectSite.objects.create(project=p, site_code='MS1-S02', site_name='B', capacity_mw=Decimal('3'))
+        services.apply_default_site_assessments(s2)
+        r = services.project_readiness(p)
+        self.assertTrue(r['locked'])
+        self.assertTrue(any('B (3' in x for x in r['sites']))
+
+    def test_per_site_noc_label_includes_site(self):
+        from .models import ProjectSite, StatutoryApproval
+        p = self._project()
+        site = ProjectSite.objects.create(project=p, site_code='MS1-S01', site_name='Pokaran-A', capacity_mw=Decimal('5'), status=ProjectSite.STATUS_CLEARED)
+        StatutoryApproval.objects.create(project=p, site=site, authority='DISCOM', approval_type='Feeder', is_mandatory=True, status='pending')
+        nocs = services.noc_blockers(p)
+        self.assertTrue(any('Pokaran-A' in n for n in nocs))
+
+    def test_sites_endpoint_requires_login(self):
+        p = self._project()
+        resp = self.client.get(reverse('solar-sites', args=[p.id]))
+        self.assertIn(resp.status_code, (302, 401, 403))

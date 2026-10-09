@@ -1033,18 +1033,26 @@ class StatutoryApproval(models.Model):
     STATUS_APPROVED = 'approved'
     STATUS_REJECTED = 'rejected'
     STATUS_RESUBMIT = 'resubmit'
+    STATUS_WAIVED = 'waived'
     STATUS_CHOICES = [
         (STATUS_PENDING, 'Pending'), (STATUS_SUBMITTED, 'Submitted'),
         (STATUS_APPROVED, 'Approved'), (STATUS_REJECTED, 'Rejected'),
-        (STATUS_RESUBMIT, 'Resubmit required'),
+        (STATUS_RESUBMIT, 'Resubmit required'), (STATUS_WAIVED, 'Waived / N/A'),
     ]
+    # statuses that satisfy a mandatory NOC for the development gate
+    SATISFIED_STATUSES = (STATUS_APPROVED, STATUS_WAIVED)
 
     project = models.ForeignKey('core.ProjectMaster', on_delete=models.CASCADE, related_name='statutory_approvals')
+    # A NOC may be project-wide (site null) or specific to one site/location.
+    site = models.ForeignKey('ProjectSite', on_delete=models.CASCADE, null=True, blank=True, related_name='statutory_approvals')
     document = models.ForeignKey(EngineeringDocument, on_delete=models.SET_NULL, null=True, blank=True, related_name='statutory_approvals')
     authority = models.CharField(max_length=120)       # DISCOM / CEIG / CEA …
     approval_type = models.CharField(max_length=150)   # feeder approval, energisation …
     reference_no = models.CharField(max_length=80, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    # A mandatory NOC/certificate gates the start of development until it is
+    # Approved (or Waived). Drives the project-readiness lock.
+    is_mandatory = models.BooleanField(default=False)
     submitted_date = models.DateField(null=True, blank=True)
     approved_date = models.DateField(null=True, blank=True)
     valid_until = models.DateField(null=True, blank=True)
@@ -1057,3 +1065,167 @@ class StatutoryApproval(models.Model):
 
     def __str__(self):
         return f'{self.authority} — {self.approval_type} ({self.status})'
+
+    @property
+    def is_satisfied(self):
+        return self.status in self.SATISFIED_STATUSES
+
+
+# =========================================================================
+# Subcontractor Work Order — Module 3
+# A labour-only contract binding a vendor (subcontractor) to a scope of work
+# packages, with a milestone or free-issue engagement and a per-Watt / lumpsum
+# rate basis that feeds the profitability calculator. Issuing a work order can
+# propagate the vendor + engagement onto its work packages.
+# =========================================================================
+class SubcontractWorkOrder(models.Model):
+    RATE_PER_WP = 'per_wp'
+    RATE_PER_WATT = 'per_wp_wattage'
+    RATE_LUMPSUM = 'lumpsum'
+    RATE_BASIS_CHOICES = [
+        (RATE_PER_WP, 'Per work package'),
+        (RATE_PER_WATT, 'Per Watt (₹/Wp)'),
+        (RATE_LUMPSUM, 'Lump sum'),
+    ]
+
+    STATUS_DRAFT = 'draft'
+    STATUS_ISSUED = 'issued'
+    STATUS_IN_PROGRESS = 'in_progress'
+    STATUS_COMPLETED = 'completed'
+    STATUS_CLOSED = 'closed'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'), (STATUS_ISSUED, 'Issued'),
+        (STATUS_IN_PROGRESS, 'In progress'), (STATUS_COMPLETED, 'Completed'),
+        (STATUS_CLOSED, 'Closed'), (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
+    wo_no = models.CharField(max_length=40, unique=True)
+    project = models.ForeignKey('core.ProjectMaster', on_delete=models.CASCADE, related_name='work_orders')
+    vendor = models.ForeignKey('core.Vendor', on_delete=models.PROTECT, related_name='work_orders')
+    engagement_type = models.CharField(
+        max_length=20, choices=ProjectWorkPackage.ENGAGEMENT_CHOICES,
+        default=ProjectWorkPackage.ENGAGEMENT_MILESTONE,
+    )
+    title = models.CharField(max_length=200)
+    scope_note = models.TextField(blank=True)
+    contract_value = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
+    rate_basis = models.CharField(max_length=20, choices=RATE_BASIS_CHOICES, default=RATE_LUMPSUM)
+    rate_per_wp = models.DecimalField(max_digits=16, decimal_places=4, default=Decimal('0'))  # ₹/Wp outflow
+    retention_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0'))
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='work_orders_created')
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'solar_subcontract_work_order'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f'{self.wo_no} — {self.vendor_id}'
+
+    @property
+    def lines_value(self):
+        agg = self.lines.aggregate(s=models.Sum('line_value'))
+        return agg['s'] or Decimal('0')
+
+    @property
+    def work_package_count(self):
+        return self.lines.count()
+
+
+class SubcontractWorkOrderLine(models.Model):
+    work_order = models.ForeignKey(SubcontractWorkOrder, on_delete=models.CASCADE, related_name='lines')
+    work_package = models.ForeignKey(ProjectWorkPackage, on_delete=models.CASCADE, related_name='work_order_lines')
+    line_value = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        db_table = 'solar_subcontract_wo_line'
+        ordering = ['id']
+        unique_together = [('work_order', 'work_package')]
+
+    def __str__(self):
+        return f'{self.work_order.wo_no} · {self.work_package.name}'
+
+
+# =========================================================================
+# Sites / Locations — per-location records (Module 1 extension)
+# A project spans several sites (locations); each carries its own capacity
+# (MW), assessment checklist and statutory NOC/compliance. The project's
+# total MW rolls up from its sites, and the development gate is satisfied
+# only when every site is cleared and its mandatory NOCs are approved.
+# =========================================================================
+class ProjectSite(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_IN_ASSESSMENT = 'in_assessment'
+    STATUS_CLEARED = 'cleared'
+    STATUS_ON_HOLD = 'on_hold'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'), (STATUS_IN_ASSESSMENT, 'In assessment'),
+        (STATUS_CLEARED, 'Cleared'), (STATUS_ON_HOLD, 'On hold'),
+    ]
+
+    project = models.ForeignKey('core.ProjectMaster', on_delete=models.CASCADE, related_name='solar_sites')
+    site_code = models.CharField(max_length=40, unique=True)
+    site_name = models.CharField(max_length=200)
+    location = models.CharField(max_length=255, blank=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    capacity_mw = models.DecimalField(max_digits=10, decimal_places=3, default=Decimal('0'))
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'solar_project_site'
+        ordering = ['project', 'site_code']
+
+    def __str__(self):
+        return f'{self.site_code} — {self.site_name}'
+
+    @property
+    def is_cleared(self):
+        return self.status == self.STATUS_CLEARED
+
+
+class SiteAssessmentItem(models.Model):
+    """One assessment/compliance check for a site (e.g. topographical survey,
+    soil resistivity, land title, shadow analysis). A site is development-ready
+    only when its mandatory items are cleared (or waived)."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_CLEARED = 'cleared'
+    STATUS_REJECTED = 'rejected'
+    STATUS_WAIVED = 'waived'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'), (STATUS_SUBMITTED, 'Submitted'),
+        (STATUS_CLEARED, 'Cleared'), (STATUS_REJECTED, 'Rejected'),
+        (STATUS_WAIVED, 'Waived / N/A'),
+    ]
+    SATISFIED_STATUSES = (STATUS_CLEARED, STATUS_WAIVED)
+
+    site = models.ForeignKey(ProjectSite, on_delete=models.CASCADE, related_name='assessments')
+    name = models.CharField(max_length=200)
+    is_mandatory = models.BooleanField(default=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    document = models.ForeignKey(EngineeringDocument, on_delete=models.SET_NULL, null=True, blank=True, related_name='assessment_items')
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'solar_site_assessment_item'
+        ordering = ['site', 'id']
+
+    def __str__(self):
+        return f'{self.name} ({self.status})'
+
+    @property
+    def is_satisfied(self):
+        return self.status in self.SATISFIED_STATUSES

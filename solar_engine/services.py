@@ -122,6 +122,150 @@ def _default_boq_template(project_type):
 
 
 # --- Instantiation --------------------------------------------------------
+SITE_CLEARED = 'cleared'
+
+# Standard per-site assessment checklist (land/location compliance).
+DEFAULT_SITE_ASSESSMENTS = [
+    'Topographical / land survey',
+    'Soil resistivity test',
+    'Land title / ownership verification',
+    'Shadow analysis & row spacing',
+    'Access road & logistics feasibility',
+]
+
+# Standard solar-EPC statutory NOC / certificate checklist. Applied per site
+# (or project-wide). Each is a mandatory StatutoryApproval that must reach
+# Approved (or Waived) before development can start.
+DEFAULT_NOC_CHECKLIST = [
+    ('DISCOM', 'Feasibility / connectivity approval'),
+    ('DISCOM', 'Feeder / evacuation approval'),
+    ('CEIG / Electrical Inspectorate', 'Drawing approval'),
+    ('Chief Electrical Inspector (CEIG)', 'Energisation / charging permission'),
+    ('State Pollution Control Board', 'Consent to Establish (CTE)'),
+    ('Fire Department', 'Fire NOC'),
+    ('Revenue / Land Authority', 'Land use / conversion clearance'),
+]
+
+
+def recalc_project_mw(project):
+    """Roll the project's total MW up from the sum of its sites' capacities."""
+    from django.db.models import Sum
+    from .models import ProjectSite
+    agg = ProjectSite.objects.filter(project=project).aggregate(s=Sum('capacity_mw'))
+    total = agg['s'] or Decimal('0')
+    if project.total_mw != total:
+        project.total_mw = total
+        project.save(update_fields=['total_mw'])
+    return total
+
+
+def apply_default_site_assessments(site):
+    """Ensure a site has the standard mandatory assessment checklist."""
+    from .models import SiteAssessmentItem
+    created = 0
+    for name in DEFAULT_SITE_ASSESSMENTS:
+        if not SiteAssessmentItem.objects.filter(site=site, name=name).exists():
+            SiteAssessmentItem.objects.create(site=site, name=name, is_mandatory=True)
+            created += 1
+    return created
+
+
+def apply_default_noc_checklist(project, site=None):
+    """Ensure the standard mandatory NOC checklist exists for a site (or the
+    project when site is None). Returns the number created."""
+    from .models import StatutoryApproval
+    created = 0
+    for authority, approval_type in DEFAULT_NOC_CHECKLIST:
+        if not StatutoryApproval.objects.filter(
+                project=project, site=site, authority=authority, approval_type=approval_type).exists():
+            StatutoryApproval.objects.create(
+                project=project, site=site, authority=authority, approval_type=approval_type,
+                is_mandatory=True, status=StatutoryApproval.STATUS_PENDING,
+                remark='Auto-added from the standard NOC checklist.')
+            created += 1
+    return created
+
+
+def maybe_autoclear_site(site):
+    """Flip a site to 'cleared' once all its mandatory assessments and
+    mandatory NOCs are satisfied; otherwise mark it 'in_assessment' while work
+    is in progress. Never overrides an explicit 'on_hold'."""
+    from .models import ProjectSite, StatutoryApproval
+    if site.status == ProjectSite.STATUS_ON_HOLD:
+        return site
+    assess_ok = not site.assessments.filter(is_mandatory=True).exclude(
+        status__in=list(site.assessments.model.SATISFIED_STATUSES)).exists()
+    noc_ok = not site.statutory_approvals.filter(is_mandatory=True).exclude(
+        status__in=list(StatutoryApproval.SATISFIED_STATUSES)).exists()
+    has_any = site.assessments.exists() or site.statutory_approvals.exists()
+    new_status = site.status
+    if assess_ok and noc_ok and has_any:
+        new_status = ProjectSite.STATUS_CLEARED
+    elif has_any:
+        new_status = ProjectSite.STATUS_IN_ASSESSMENT
+    if new_status != site.status:
+        site.status = new_status
+        site.save(update_fields=['status', 'updated_at'])
+    return site
+
+
+def site_blockers(project):
+    """Per-site reasons the project is not development-ready. A project with no
+    registered site is blocked; each non-cleared site lists its pending
+    mandatory assessment items."""
+    from .models import ProjectSite
+    sites = list(ProjectSite.objects.filter(project=project))
+    # No locations recorded yet → nothing to gate on here (project-level NOCs
+    # may still gate). Once a site exists, it must be cleared.
+    reasons = []
+    for s in sites:
+        if s.is_cleared:
+            continue
+        pending = list(s.assessments.filter(is_mandatory=True).exclude(
+            status__in=list(s.assessments.model.SATISFIED_STATUSES)).values_list('name', flat=True))
+        label = f'{s.site_name} ({s.capacity_mw} MW)'
+        detail = f" — pending: {', '.join(pending)}" if pending else ''
+        reasons.append(f'{label} [{s.get_status_display()}]{detail}')
+    return reasons
+
+
+def noc_blockers(project):
+    """Every mandatory StatutoryApproval (project-wide or per-site) not yet
+    Approved/Waived, labelled with its site/location where applicable."""
+    from .models import StatutoryApproval
+    rows = (StatutoryApproval.objects.filter(project=project, is_mandatory=True)
+            .select_related('site'))
+    reasons = []
+    for a in rows:
+        if a.status not in StatutoryApproval.SATISFIED_STATUSES:
+            where = f'{a.site.site_name} · ' if a.site_id else ''
+            reasons.append(f'{where}{a.authority} · {a.approval_type} [{a.get_status_display()}]')
+    return reasons
+
+
+# Back-compat alias — older callers used this name.
+def site_assessment_blockers(project):
+    return site_blockers(project)
+
+
+def project_readiness(project):
+    """Combined development-gate readiness for a project.
+
+    Returns {'locked', 'reasons', 'sites', 'nocs'}. Development (the
+    work-structure build) is allowed only when every site is cleared AND every
+    mandatory certificate / NOC (project-wide or per-site) is Approved/Waived.
+    """
+    sites = site_blockers(project)
+    nocs = noc_blockers(project)
+    reasons = [f'Site: {s}' for s in sites] + [f'Pending NOC: {n}' for n in nocs]
+    return {
+        'locked': bool(sites or nocs),
+        'reasons': reasons,
+        'sites': sites,
+        'nocs': nocs,
+    }
+
+
 @transaction.atomic
 def instantiate_build(project, project_type, ac_mw, spec_set=None,
                       foundation_type='', wbs_template=None, boq_template=None, user=None):
@@ -131,6 +275,15 @@ def instantiate_build(project, project_type, ac_mw, spec_set=None,
         raise EngineError('Invalid project type.')
     if ProjectBuild.objects.filter(project=project).exists():
         raise EngineError('This project already has a work-structure build.')
+
+    # Development gate: the project must be "ready" — every site cleared AND
+    # every mandatory certificate / NOC (DMS) approved — before the
+    # work-structure build can start.
+    readiness = project_readiness(project)
+    if readiness['locked']:
+        raise EngineError(
+            'Development is blocked until the project is cleared. '
+            + ' | '.join(readiness['reasons']))
 
     spec_set = spec_set or _default_spec_set()
     wbs_template = wbs_template or _default_wbs_template(project_type)
