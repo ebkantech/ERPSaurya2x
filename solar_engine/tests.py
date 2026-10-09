@@ -771,14 +771,26 @@ class PerSiteComplianceTests(TestCase):
     def _project(self):
         return ProjectMaster.objects.create(project_name='Multi-site', project_code='MS1', total_mw=Decimal('0'))
 
-    def test_project_mw_rolls_up_from_sites(self):
+    def test_allocated_mw_sums_sites(self):
         from .models import ProjectSite
-        p = self._project()
-        ProjectSite.objects.create(project=p, site_code='MS1-S01', site_name='A', capacity_mw=Decimal('3'))
-        ProjectSite.objects.create(project=p, site_code='MS1-S02', site_name='B', capacity_mw=Decimal('2.5'))
-        services.recalc_project_mw(p)
-        p.refresh_from_db()
-        self.assertEqual(p.total_mw, Decimal('5.5'))
+        p = ProjectMaster.objects.create(project_name='Alloc', project_code='AL1', total_mw=Decimal('10'))
+        ProjectSite.objects.create(project=p, site_code='AL1-S01', site_name='A', capacity_mw=Decimal('3'))
+        ProjectSite.objects.create(project=p, site_code='AL1-S02', site_name='B', capacity_mw=Decimal('2.5'))
+        self.assertEqual(services.allocated_mw(p), Decimal('5.5'))
+
+    def test_site_capacity_cannot_exceed_project(self):
+        from .models import ProjectSite
+        p = ProjectMaster.objects.create(project_name='Cap', project_code='CP1', total_mw=Decimal('5'))
+        ProjectSite.objects.create(project=p, site_code='CP1-S01', site_name='A', capacity_mw=Decimal('3'))
+        # 3 already allocated of 5 → a 3 MW site (total 6) must be rejected
+        with self.assertRaises(services.EngineError):
+            services.validate_site_capacity(p, Decimal('3'))
+        # 2 MW fits exactly
+        services.validate_site_capacity(p, Decimal('2'))
+
+    def test_no_cap_when_project_capacity_unset(self):
+        p = ProjectMaster.objects.create(project_name='NoCap', project_code='NC1', total_mw=Decimal('0'))
+        services.validate_site_capacity(p, Decimal('999'))  # no error
 
     def test_no_site_is_not_blocked(self):
         # A project with no locations yet is not gated on sites.
@@ -831,4 +843,136 @@ class PerSiteComplianceTests(TestCase):
     def test_sites_endpoint_requires_login(self):
         p = self._project()
         resp = self.client.get(reverse('solar-sites', args=[p.id]))
+        self.assertIn(resp.status_code, (302, 401, 403))
+
+
+class MarginTests(TestCase):
+    """Per-Watt profitability / margin calculator."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+        from core.models import Vendor
+        cls.vendor = Vendor.objects.create(
+            vendor_id='VMG01', company_name='Margin Labour Co',
+            vendor_type='partner', vendor_category='sub-contractor', status='active')
+
+    def test_margin_math(self):
+        from . import margin as m
+        from . import work_orders as wo_svc
+        from .models import ProjectWorkPackage
+        p = ProjectMaster.objects.create(project_name='Margin', project_code='MG1', total_mw=Decimal('5'))
+        build = services.instantiate_build(p, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        wp = ProjectWorkPackage.objects.filter(stage__build=build).first()
+        # client pays 30 ₹/Wp → revenue = 30 * 5,000,000 = 150,000,000
+        c = m.get_commercials(p); c.client_rate_per_wp = Decimal('30'); c.overhead_percent = Decimal('10'); c.save()
+        # one labour work order worth 40,000,000 outflow
+        w = wo_svc.create_work_order(p, self.vendor, 'Labour', lines=[{'work_package_id': wp.id, 'line_value': '40000000'}],
+                                     contract_value='40000000')
+        res = m.compute_margin(p)
+        self.assertEqual(res['revenue'], '150000000.00')
+        self.assertEqual(res['subcontractor_outflow'], '40000000.00')
+        self.assertEqual(res['overhead'], '15000000.00')       # 10% of 150M
+        self.assertEqual(res['margin'], '95000000.00')         # 150 - 40 - 15
+        self.assertEqual(res['margin_per_wp'], '19.0000')      # 95M / 5M Wp
+        self.assertEqual(res['margin_percent'], '63.33')
+
+    def test_margin_endpoint_requires_login(self):
+        p = ProjectMaster.objects.create(project_name='MgAuth', total_mw=Decimal('5'))
+        resp = self.client.get(reverse('solar-margin', args=[p.id]))
+        self.assertIn(resp.status_code, (302, 401, 403))
+
+
+class GrnTests(TestCase):
+    """Goods Receipt Note — inbound client-furnished material."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.project = ProjectMaster.objects.create(project_name='GRN Proj', project_code='GR1', total_mw=Decimal('5'))
+
+    def test_create_grn_numbers_and_serials(self):
+        from . import grn as g
+        grn = g.create_grn(self.project, [
+            {'material_name': '550Wp Module', 'quantity_received': '100', 'unit': 'Nos',
+             'serial_numbers': 'M001\nM002\nM003'},
+            {'material_name': 'String Inverter', 'quantity_received': '4', 'unit': 'Nos',
+             'serial_numbers': 'INV-1, INV-2'},
+        ], supplier='Client OEM', consignment_ref='CH-5521')
+        self.assertTrue(grn.grn_no.startswith('GRN-'))
+        self.assertEqual(grn.lines.count(), 2)
+        self.assertEqual(grn.lines.get(material_name='550Wp Module').serial_count, 3)
+        self.assertEqual(grn.lines.get(material_name='String Inverter').serial_count, 2)
+
+    def test_received_stock_pools_ok_lines(self):
+        from . import grn as g
+        from .models import GoodsReceiptNote, GoodsReceiptLine
+        g.create_grn(self.project, [{'material_name': 'Module', 'quantity_received': '100'}])
+        grn2 = g.create_grn(self.project, [{'material_name': 'Module', 'quantity_received': '50'}])
+        # a damaged line should NOT count
+        GoodsReceiptLine.objects.create(grn=grn2, material_name='Module', quantity_received=Decimal('999'),
+                                        condition=GoodsReceiptLine.CONDITION_DAMAGED)
+        pool = g.received_stock(self.project)
+        self.assertEqual(pool['Module'], Decimal('150'))
+
+    def test_rejected_grn_excluded_from_stock(self):
+        from . import grn as g
+        from .models import GoodsReceiptNote
+        grn = g.create_grn(self.project, [{'material_name': 'Cable', 'quantity_received': '500'}])
+        grn.status = GoodsReceiptNote.STATUS_REJECTED; grn.save()
+        self.assertNotIn('Cable', g.received_stock(self.project))
+
+    def test_empty_grn_rejected(self):
+        from . import grn as g
+        with self.assertRaises(services.EngineError):
+            g.create_grn(self.project, [])
+
+    def test_grn_endpoint_requires_login(self):
+        resp = self.client.get(reverse('solar-grn', args=[self.project.id]))
+        self.assertIn(resp.status_code, (302, 401, 403))
+
+
+class DossierTests(TestCase):
+    """As-built dossier manifest aggregation."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_solar_templates')
+
+    def test_manifest_aggregates_sections(self):
+        from . import dossier as d, dms as dms_svc, grn as grn_svc
+        from .models import (EngineeringDocument, DocumentRevision, HandoverCertificate)
+        import datetime
+        p = ProjectMaster.objects.create(project_name='Dossier', project_code='DS1', total_mw=Decimal('5'))
+        build = services.instantiate_build(p, C.PROJECT_TYPE_ROOFTOP, Decimal('5'))
+        # approved as-built doc
+        doc = EngineeringDocument.objects.create(project=p, build=build, doc_no='AB-SLD-1',
+            title='As-built SLD', discipline=EngineeringDocument.DISC_ELEC, category=EngineeringDocument.CAT_SLD)
+        dms_svc.add_revision(doc, change_note='as-built')
+        dms_svc.set_revision_status(doc.current_revision, DocumentRevision.STATUS_APPROVED)
+        # GRN with serials
+        grn_svc.create_grn(p, [{'material_name': 'Module', 'quantity_received': '3',
+                                 'serial_numbers': 'S1\nS2\nS3'}])
+        # handover cert (issued)
+        HandoverCertificate.objects.create(build=build, certificate_number='HOC-1',
+            site_name='A', status=HandoverCertificate.STATUS_ISSUED, issued_date=datetime.date.today())
+        m = d.build_manifest(p)
+        self.assertEqual(m['counts']['documents_approved'], 1)
+        self.assertEqual(m['counts']['serials'], 3)
+        self.assertEqual(m['counts']['certificates'], 1)
+        self.assertEqual(m['counts']['punch_open'], 0)
+        self.assertTrue(m['ready'])   # docs + no open punch + certificate
+
+    def test_zip_builds(self):
+        from . import dossier as d
+        p = ProjectMaster.objects.create(project_name='Zip', project_code='ZP1', total_mw=Decimal('5'))
+        name, data = d.build_zip(p)
+        self.assertTrue(name.endswith('.zip'))
+        import zipfile, io
+        z = zipfile.ZipFile(io.BytesIO(data))
+        self.assertIn('DOSSIER.md', z.namelist())
+        self.assertIn('manifest.json', z.namelist())
+
+    def test_dossier_endpoint_requires_login(self):
+        p = ProjectMaster.objects.create(project_name='DAuth', total_mw=Decimal('5'))
+        resp = self.client.get(reverse('solar-dossier', args=[p.id]))
         self.assertIn(resp.status_code, (302, 401, 403))

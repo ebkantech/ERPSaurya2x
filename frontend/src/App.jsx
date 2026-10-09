@@ -49,7 +49,9 @@ import VendorControlDetail    from './pages/vendor-control/VendorControlDetail'
 import TaskCenter             from './pages/vendor-control/TaskCenter'
 import Followups              from './pages/vendor-control/Followups'
 import DailyWorkProgress from './pages/operations/DailyWorkProgress'
-
+import MarginCalculator from './pages/operations/MarginCalculator'
+import GoodsReceipt from './pages/operations/GoodsReceipt'
+import HandoverDossier from './pages/operations/HandoverDossier'
 function PrivateRoute({ children }) {
   const { isAuthenticated } = useAuth()
   return isAuthenticated ? children : <Navigate to="/login" replace />
@@ -90,12 +92,16 @@ export default function App() {
             <Route path="projects/:projectId/sites/new"      element={<SiteCreate />}     />
             <Route path="projects/:projectId/sites/:siteId"  element={<SiteAssessment />} />
             <Route path="projects/site-assessment" element={<SiteAssessment />} />
+
             <Route path="work-structure/:projectId" element={<ProjectWorkStructure />} />
             <Route path="operations/daily-progress" element={<DailyWorkProgress />} />
             <Route path="operations/quality" element={<QualityControl />} />
             <Route path="operations/budget" element={<BudgetVsActual />} />
             <Route path="operations/documents" element={<DocumentControl />} />
             <Route path="operations/work-orders" element={<WorkOrders />} />
+            <Route path="operations/grn" element={<GoodsReceipt />} />
+            <Route path="operations/dossier" element={<HandoverDossier />} />
+            
             <Route path="materials"              element={<MaterialList />}  />
             <Route path="materials/quotations"     element={<QuotationList />}    />
             <Route path="materials/quotations/new" element={<QuotationBuilder />} />
@@ -103,7 +109,7 @@ export default function App() {
             <Route path="materials/quotations/:id/preview" element={<QuotationPreview />} />
             <Route path="transport"              element={<TransportList />} />
             <Route path="tasks"                  element={<TaskList />}      />
-
+            <Route path="operations/margin" element={<MarginCalculator />} />
             {/* Analytics */}
             <Route path="reports"                element={<ReportsList />}       />
             <Route path="notifications"          element={<NotificationsList />} />

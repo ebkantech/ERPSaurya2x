@@ -9,6 +9,9 @@ from . import free_issue_views as fiv
 from . import dms_views as dms
 from . import work_order_views as wov
 from . import site_views as sv
+from . import margin_views as mv
+from . import grn_views as grnv
+from . import dossier_views as dsv
 
 urlpatterns = [
     # Vendor / subcontractor portal (token-auth, vendor-scoped, read-only)
@@ -74,6 +77,11 @@ urlpatterns = [
     path('projects/<int:project_id>/sites/', sv.project_sites_view, name='solar-sites'),
     path('sites/<int:site_id>/', sv.site_detail_view, name='solar-site'),
     path('assessment-items/<int:item_id>/', sv.site_assessment_detail_view, name='solar-assessment-item'),
+    path('projects/<int:project_id>/margin/', mv.project_margin_view, name='solar-margin'),
+    path('projects/<int:project_id>/grn/', grnv.project_grn_view, name='solar-grn'),
+    path('grn/<int:grn_id>/', grnv.grn_detail_view, name='solar-grn-detail'),
+    path('projects/<int:project_id>/dossier/', dsv.project_dossier_view, name='solar-dossier'),
+    path('projects/<int:project_id>/dossier/download/', dsv.project_dossier_download_view, name='solar-dossier-download'),
     # Subcontractor Work Orders
     path('projects/<int:project_id>/work-orders/', wov.project_work_orders_view, name='solar-work-orders'),
     path('work-orders/<int:wo_id>/', wov.work_order_detail_view, name='solar-work-order'),

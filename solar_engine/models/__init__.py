@@ -9,3 +9,4 @@ from .procurement import *  # noqa: F401,F403
 from .dms import *  # noqa: F401,F403
 from .work_orders import *  # noqa: F401,F403
 from .sites import *  # noqa: F401,F403
+from .financials import *  # noqa: F401,F403

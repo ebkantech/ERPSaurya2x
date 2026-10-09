@@ -338,6 +338,27 @@ class Command(BaseCommand):
         # ----- 17. sites / locations (per-location compliance) ----------
         self._seed_sites(project, w)
 
+        # ----- 17b. goods receipt (inbound client modules/inverters) ----
+        from solar_engine import grn as _grn
+        from solar_engine.models import GoodsReceiptNote
+        if not GoodsReceiptNote.objects.filter(project=project).exists():
+            _grn.create_grn(project, [
+                {'material_name': 'PV Module 550Wp (DCR)', 'unit': 'Nos', 'quantity_received': '9100',
+                 'serial_numbers': 'MOD-0001\nMOD-0002\nMOD-0003'},
+                {'material_name': 'String Inverter 250kW', 'unit': 'Nos', 'quantity_received': '20',
+                 'serial_numbers': 'INV-01, INV-02, INV-03'},
+            ], supplier='Client (free-issue)', consignment_ref='CL-CHALLAN-7781',
+               received_by_name='Stores')
+            w('Goods receipt seeded (client modules + inverters with serials).')
+
+        # ----- 18. commercials for the margin calculator ----------------
+        from solar_engine import margin as _margin
+        comm = _margin.get_commercials(project)
+        comm.client_rate_per_wp = Decimal('32.00')   # ₹/Wp client inflow
+        comm.overhead_percent = Decimal('8.00')
+        comm.save()
+        w('Commercials set (client ₹32/Wp, 8% overhead) for the margin calculator.')
+
         w(self.style.SUCCESS(
             f'\nDone. Log into FieldTracker2x with vendor code "{VENDOR_CODE}". '
             f'ERP project: {PROJECT_CODE} (build #{build.id}).'))

@@ -46,7 +46,7 @@ const navGroups = [
       { label: 'Materials', icon: Package, path: '/materials' },
       { label: 'Quotations', icon: PackageSearch, path: '/materials/quotations' },
       { label: 'Transport', icon: ArrowLeftRight, path: '/transport' },
-      { label: 'Goods Receipt (GRN)', icon: Inbox, soon: true },
+      { label: 'Goods Receipt (GRN)', icon: Inbox, path: '/operations/grn' },
     ],
   },
   {
@@ -62,7 +62,7 @@ const navGroups = [
     items: [
       { label: 'Budget vs Actual', icon: Wallet, path: '/operations/budget' },
       { label: 'Payments', icon: CreditCard, path: '/payments' },
-      { label: 'Margin (₹/Wp)', icon: IndianRupee, soon: true },
+      { label: 'Margin (₹/Wp)', icon: IndianRupee, path: '/operations/margin' },
     ],
   },
   {
@@ -70,6 +70,7 @@ const navGroups = [
     items: [
       { label: 'Handover (in Work Structure)', icon: FileCheck, path: '/projects' },
       { label: 'As-built Dossier', icon: Archive, soon: true },
+      { label: 'Handover Dossier', icon: Archive, path: '/operations/dossier' },
     ],
   },
   {

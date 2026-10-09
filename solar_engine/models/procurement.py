@@ -180,3 +180,69 @@ class MaterialIssueSlipLine(models.Model):
     def __str__(self):
         return f'{self.material_name} x {self.quantity_issued}'
 
+
+
+# =========================================================================
+# Goods Receipt Note (GRN) — inbound client-furnished material (FIM)
+# The client supplies modules/inverters; a GRN records what arrived at the
+# store/site (quantity, serial numbers, condition) before it can be
+# free-issued to a vendor via an MIS. Serial numbers feed the as-built dossier.
+# =========================================================================
+class GoodsReceiptNote(models.Model):
+    STATUS_RECEIVED = 'received'
+    STATUS_VERIFIED = 'verified'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [
+        (STATUS_RECEIVED, 'Received'), (STATUS_VERIFIED, 'Verified'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    grn_no = models.CharField(max_length=40, unique=True)
+    project = models.ForeignKey('core.ProjectMaster', on_delete=models.CASCADE, related_name='goods_receipts')
+    site = models.ForeignKey('ProjectSite', on_delete=models.SET_NULL, null=True, blank=True, related_name='goods_receipts')
+    supplier = models.CharField(max_length=200, blank=True)        # client / OEM supplying the material
+    consignment_ref = models.CharField(max_length=120, blank=True) # client challan / invoice no.
+    received_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_RECEIVED)
+    received_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='goods_receipts')
+    received_by_name = models.CharField(max_length=150, blank=True)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'solar_goods_receipt_note'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return self.grn_no
+
+
+class GoodsReceiptLine(models.Model):
+    CONDITION_OK = 'ok'
+    CONDITION_DAMAGED = 'damaged'
+    CONDITION_SHORT = 'short'
+    CONDITION_CHOICES = [
+        (CONDITION_OK, 'OK'), (CONDITION_DAMAGED, 'Damaged'), (CONDITION_SHORT, 'Short supply'),
+    ]
+
+    grn = models.ForeignKey(GoodsReceiptNote, on_delete=models.CASCADE, related_name='lines')
+    material_code = models.CharField(max_length=60, blank=True)
+    material_name = models.CharField(max_length=200)
+    unit = models.CharField(max_length=40, default='Nos')
+    quantity_received = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal('0'))
+    condition = models.CharField(max_length=20, choices=CONDITION_CHOICES, default=CONDITION_OK)
+    serial_numbers = models.TextField(blank=True)   # one per line / comma-separated — for the as-built dossier
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        db_table = 'solar_goods_receipt_line'
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.material_name} x {self.quantity_received}'
+
+    @property
+    def serial_count(self):
+        if not self.serial_numbers:
+            return 0
+        return len([s for s in self.serial_numbers.replace(',', '\n').splitlines() if s.strip()])

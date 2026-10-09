@@ -66,9 +66,13 @@ def project_sites_view(request, project_id):
 
     if request.method == 'GET':
         sites = project.solar_sites.prefetch_related('assessments', 'statutory_approvals')
+        allocated = services.allocated_mw(project)
+        cap = project.total_mw or 0
         return JsonResponse({
             'sites': [_ser_site(s) for s in sites],
             'project_total_mw': str(project.total_mw),
+            'allocated_mw': str(allocated),
+            'remaining_mw': str((project.total_mw or 0) - allocated),
             'readiness': services.project_readiness(project),
         })
 
@@ -87,6 +91,7 @@ def project_sites_view(request, project_id):
         return JsonResponse({'error': f'Site code {code} already exists.'}, status=400)
 
     try:
+        services.validate_site_capacity(project, data.get('capacity_mw') or 0)
         with transaction.atomic():
             site = ProjectSite.objects.create(
                 project=project, site_code=code[:40], site_name=name[:200],
@@ -149,6 +154,10 @@ def site_detail_view(request, site_id):
             setattr(site, f, (data[f] or '')[:255])
     mw_changed = False
     if 'capacity_mw' in data:
+        try:
+            services.validate_site_capacity(site.project, data['capacity_mw'] or 0, exclude_site_id=site.id)
+        except services.EngineError as e:
+            return JsonResponse({'error': str(e)}, status=400)
         site.capacity_mw = data['capacity_mw'] or 0
         mw_changed = True
     if 'latitude' in data:

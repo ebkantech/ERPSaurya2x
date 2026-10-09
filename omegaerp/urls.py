@@ -216,6 +216,7 @@ urlpatterns = [
     re_path(r'^projects/?$', _react_index),
     re_path(r'^projects/new/?$', _react_index),
     re_path(r'^projects/solar-tracker/?$', _react_index),
+    re_path(r'^projects/site-assessment/?$', _react_index),
     # Site registry & assessment live under a project, so they need an explicit
     # allow here — the catch-all below excludes the whole 'projects/' prefix.
     re_path(r'^projects/[0-9]+/sites/?$', _react_index),

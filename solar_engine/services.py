@@ -6,7 +6,7 @@ Design: templates are the source of truth (config-driven). Sizing produces
 editable until the build is locked.
 """
 import math
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
@@ -147,16 +147,44 @@ DEFAULT_NOC_CHECKLIST = [
 ]
 
 
-def recalc_project_mw(project):
-    """Roll the project's total MW up from the sum of its sites' capacities."""
+def allocated_mw(project):
+    """Sum of the project's site capacities (MW allocated across locations)."""
     from django.db.models import Sum
     from .models import ProjectSite
-    agg = ProjectSite.objects.filter(project=project).aggregate(s=Sum('capacity_mw'))
-    total = agg['s'] or Decimal('0')
-    if project.total_mw != total:
-        project.total_mw = total
-        project.save(update_fields=['total_mw'])
-    return total
+    return ProjectSite.objects.filter(project=project).aggregate(
+        s=Sum('capacity_mw'))['s'] or Decimal('0')
+
+
+def validate_site_capacity(project, new_mw, exclude_site_id=None):
+    """A site's capacity cannot push the project's allocated MW above the
+    project's own capacity (total_mw). No cap is enforced when the project's
+    capacity is not set (<= 0)."""
+    from django.db.models import Sum
+    from .models import ProjectSite
+    cap = project.total_mw or Decimal('0')
+    try:
+        new_mw = Decimal(str(new_mw if new_mw not in (None, '') else '0'))
+    except (InvalidOperation, TypeError, ValueError):
+        raise EngineError('Invalid site capacity.')
+    if new_mw < 0:
+        raise EngineError('Site capacity cannot be negative.')
+    if cap <= 0:
+        return  # project capacity not set → nothing to cap against
+    qs = ProjectSite.objects.filter(project=project)
+    if exclude_site_id:
+        qs = qs.exclude(pk=exclude_site_id)
+    others = qs.aggregate(s=Sum('capacity_mw'))['s'] or Decimal('0')
+    if others + new_mw > cap:
+        remaining = cap - others
+        raise EngineError(
+            f'Site capacity {new_mw} MW exceeds the project capacity. '
+            f'{others} MW already allocated of {cap} MW — only {remaining} MW remaining.')
+
+
+def recalc_project_mw(project):
+    """Deprecated: project capacity is a fixed ceiling, not auto-rolled up.
+    Kept as a no-op returning the allocated MW for backward compatibility."""
+    return allocated_mw(project)
 
 
 def apply_default_site_assessments(site):

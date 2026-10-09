@@ -94,7 +94,9 @@ export default function SiteAssessment() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <Stat icon={MapPin} label="Sites / locations" value={sites.length} />
             <Stat icon={CheckCircle2} label="Cleared" value={cleared} tone="text-green-600" />
-            <Stat icon={Zap} label="Total capacity" value={`${data.project_total_mw} MW`} />
+            <Stat icon={Zap} label={`Allocated of ${data.project_total_mw} MW`}
+              value={`${data.allocated_mw ?? '0'} MW`}
+              tone={Number(data.remaining_mw) < 0 ? 'text-red-600' : 'text-slate-900'} />
             <Stat icon={locked ? Lock : ShieldCheck} label="Development" value={locked ? 'Locked' : 'Ready'} tone={locked ? 'text-amber-600' : 'text-green-600'} />
           </div>
 
@@ -111,7 +113,10 @@ export default function SiteAssessment() {
                 <div><label className="form-label">Location</label>
                   <input className="form-input" value={form.location} onChange={e => setForm(f => ({ ...f, location: e.target.value }))} placeholder="District / state" /></div>
                 <div><label className="form-label">Capacity (MW)</label>
-                  <input type="number" step="0.001" className="form-input" value={form.capacity_mw} onChange={e => setForm(f => ({ ...f, capacity_mw: e.target.value }))} /></div>
+                  <input type="number" step="0.001" className="form-input" value={form.capacity_mw} onChange={e => setForm(f => ({ ...f, capacity_mw: e.target.value }))} />
+                  {Number(data.project_total_mw) > 0 && (
+                    <p className="text-xs text-slate-400 mt-1">Project capacity {data.project_total_mw} MW · {data.remaining_mw} MW remaining</p>
+                  )}</div>
                 <label className="flex items-center gap-2 text-sm text-slate-700 mt-6">
                   <input type="checkbox" checked={form.apply_checklists} onChange={e => setForm(f => ({ ...f, apply_checklists: e.target.checked }))} className="w-4 h-4 accent-brand-500" />
                   Apply standard assessment + NOC checklists
